@@ -1,0 +1,39 @@
+# 视频转网页完整项目开发任务执行记录清单
+
+- [x] 01. 确认完整需求边界：输入视频、阶段产物、最终 HTML / PDF、无数据库、本地 JSON / JSONL 状态。
+- [x] 02. 搭建项目主包结构：CLI、pipeline、stages、storage、schemas、tools、models、prompts、render、tests。
+- [x] 03. 实现统一配置与项目初始化：`project.json`、`config.json`、`run_state.json`、`logs/`。
+- [x] 04. 实现 JSON / JSONL 读写、原子写入、路径规范化、日志记录、错误记录。
+- [x] 05. 实现总控 pipeline：按阶段运行、断点续跑、单阶段重跑、失败恢复、状态更新。
+- [x] 06. 实现 `init` / `00_init`：创建项目目录、初始化配置、校验输入视频。
+- [x] 07. 实现 `media_info` / `01_media_probe`：探测时长、帧率、尺寸、音频、编码与格式。
+- [x] 08. 接入 OpenCV 镜头分割工具，完成 `shot_split` / `02_shot_split` 原始产物生成。
+- [x] 09. 实现镜头标准化：`normalized_shots.json`、关键帧路径、镜头 ID、时间边界。
+- [x] 10. 接入字幕提取工具，完成 `subtitle_extract` / `03_subtitle_extract` 的 JSON / SRT / ASR 原始结果输出。
+- [x] 11. 实现无字幕、无音频、ASR 失败等字幕降级处理。
+- [x] 12. 实现 `subtitle_align` / `04_subtitle_align`：字幕按时间重叠对齐到镜头。
+- [x] 13. 实现 `shot_package` / `05_shot_package`：合并镜头、关键帧、字幕、前后文为 `shot_packages.jsonl`。
+- [x] 14. 实现模型适配层：文本模型、视觉模型、JSON 模式、重试、限流、调用日志。
+- [x] 15. 编写并固化 Prompt：单镜头理解、摘要压缩、目录规划、章节写作、JSON 修复。
+- [x] 16. 实现 `shot_understanding` / `06_shot_understanding`：逐镜头生成 `shot_analysis.jsonl`。
+- [x] 17. 实现镜头分析失败处理：模型调用失败时直接报错并标记阶段失败。
+- [x] 18. 实现 `summary_reduce` / `07_summary_reduce`：分块摘要、全局摘要、长视频上下文压缩。
+- [x] 19. 实现 `outline_plan` / `08_outline_plan`：生成目录、章节、代表镜头、镜头分配。
+- [x] 20. 实现 `chapter_write` / `09_chapter_write`：按章节生成正文 JSON，支持单章节重跑。
+- [x] 21. 实现静态模板系统：HTML 模板、样式、图片资源拷贝、路径转换。
+- [x] 22. 实现 `static_render` / `10_static_render`：生成 `index.html`、`render_result.json` 与可选 `report.pdf`。
+- [x] 23. 实现 `qa` / `11_qa`：校验 JSON、JSONL、路径、图片、章节引用、镜头引用、最终产物。
+- [x] 24. 实现 QA 自动修复：JSON 修复、代表图重选、缺失章节补救、PDF 失败降级。
+- [x] 25. 补齐 CLI：`run`、`resume`、`stage`、`rerun`、`render`、`qa`。
+- [x] 26. 补齐配置项：镜头阈值、抽帧比例、字幕策略、模型参数、章节数量、渲染选项。
+- [x] 27. 编写数据契约与 Schema 校验：每阶段输入、输出、错误结构。
+- [x] 28. 编写单元测试：时间计算、字幕对齐、JSONL、路径处理、状态流转、异常分支。
+- [x] 29. 编写集成测试：用样例视频跑完整 pipeline 并校验所有阶段产物。
+- [x] 30. 编写端到端验收：生成 HTML / PDF，检查图片显示、章节完整、引用可追溯。
+- [x] 31. 优化性能与缓存：重复运行跳过已完成阶段，模型调用可复用已有结果。
+- [x] 32. 完善开发文档：安装、配置、命令、阶段说明、故障排查、产物目录。
+- [x] 33. 完成发布前检查：依赖锁定、样例运行、日志清理、README 更新、版本标记。
+- [x] 34. 将阶段产物目录规范为业务步骤名：`media_info/`、`shot_split/`、`subtitle_extract/` 等，并兼容旧编号目录读取。
+- [x] 35. 实现单步骤独立运行：`media-info --video ...`、`shot-split --video ...` 可自动创建项目并补齐依赖 JSON。
+- [x] 36. 每个步骤目录固定写入 `step_manifest.json`，记录步骤名、状态、JSON / JSONL 产物和运行结果。
+- [x] 37. 编写每个步骤的单独执行命令与输出文件位置汇总文档。

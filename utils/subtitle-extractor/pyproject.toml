@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subtitle-extractor"
+version = "0.1.0"
+description = "Standalone subtitle extraction tool using Bcut ASR."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+]
+
+[project.scripts]
+subtitle-extractor = "subtitle_extractor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["subtitle_extractor*"]

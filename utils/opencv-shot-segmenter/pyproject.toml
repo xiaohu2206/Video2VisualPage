@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencv-shot-segmenter"
+version = "0.1.0"
+description = "Standalone OpenCV shot boundary detector and keyframe exporter."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+opencv-shot-segmenter = "opencv_shot_segmenter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["opencv_shot_segmenter*"]

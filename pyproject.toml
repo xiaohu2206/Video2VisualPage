@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video2visualpage"
+version = "0.1.0"
+description = "Local JSON/JSONL pipeline that turns videos into static visual reports."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+video2visualpage = "video2visualpage.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["video2visualpage*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

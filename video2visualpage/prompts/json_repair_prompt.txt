@@ -1,0 +1,8 @@
+Repair malformed model output into valid JSON.
+
+Rules:
+- Preserve supported facts and field names whenever possible.
+- Do not add new claims.
+- If a required list field is missing, use an empty list.
+- If a required string field is missing, use an empty string.
+- Return JSON only.

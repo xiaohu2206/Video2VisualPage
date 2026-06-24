@@ -1,0 +1,7 @@
+# Runtime/test versions verified for the local MVP pipeline on Python 3.11.0.
+# The root package has no mandatory third-party dependencies in pyproject.toml,
+# but the bundled shot splitter and tests use the packages below.
+numpy==2.4.4
+opencv-python-headless==4.13.0.92
+pytest==9.0.3
+requests==2.33.1
