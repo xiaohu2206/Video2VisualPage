@@ -49,6 +49,8 @@ $env:VIDEO2VISUALPAGE_PROGRESS = "0"
 
 ## Commands
 
+Commands that operate on an existing project default to `outputs\demo`, so you can omit `--project` for the common local workflow.
+
 Create a project and run the whole pipeline:
 
 ```powershell
@@ -64,15 +66,17 @@ python -m video2visualpage run .\utils\opencv-shot-segmenter\data\1.mp4 --projec
 Resume from the first incomplete stage:
 
 ```powershell
-python -m video2visualpage resume outputs\demo
+python -m video2visualpage resume
 ```
 
 Run or rerun specific stages:
 
 ```powershell
-python -m video2visualpage stage --project outputs\demo --stage subtitle_align
-python -m video2visualpage rerun --project outputs\demo --from shot_understanding --to qa
-python -m video2visualpage rerun --project outputs\demo --steps 6-11
+python -m video2visualpage stage --stage subtitle_align
+python -m video2visualpage rerun --from shot_understanding --to qa
+python -m video2visualpage rerun --steps 6-11
+python -m video2visualpage summary-reduce
+python -m video2visualpage outline-plan
 ```
 
 Run one step directly from a video. `--project-name demo` always writes `outputs\demo`; if that folder exists, it is overwritten. Missing upstream JSON steps are created automatically:
@@ -85,8 +89,8 @@ python -m video2visualpage shot-split --video .\utils\opencv-shot-segmenter\data
 Render and QA:
 
 ```powershell
-python -m video2visualpage render --project outputs\demo --format html
-python -m video2visualpage qa --project outputs\demo --fix
+python -m video2visualpage render --format html
+python -m video2visualpage qa --fix
 ```
 
 ## Steps

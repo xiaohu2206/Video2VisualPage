@@ -105,6 +105,90 @@ def test_numeric_stage_range_maps_to_padded_stage_ids() -> None:
     ]
 
 
+def test_step_command_defaults_to_demo_project(tmp_path, monkeypatch) -> None:
+    output_root = tmp_path / "outputs"
+    project_dir = output_root / "demo"
+    calls: dict[str, object] = {}
+
+    def fake_find_project_dir(project, output_root_arg=None):
+        calls["find_project_dir"] = {"project": project, "output_root": output_root_arg}
+        return project_dir
+
+    def fake_run_stage_with_dependencies(resolved_project_dir, stage_id, *, force=False):
+        calls["run_stage"] = {"project_dir": resolved_project_dir, "stage_id": stage_id, "force": force}
+        return {"stage_id": stage_id, "status": "done", "outputs": []}
+
+    monkeypatch.setattr(cli, "find_project_dir", fake_find_project_dir)
+    monkeypatch.setattr(cli, "run_stage_with_dependencies", fake_run_stage_with_dependencies)
+
+    assert cli.main(["outline-plan", "--output-root", str(output_root)]) == 0
+
+    assert calls["find_project_dir"] == {"project": "demo", "output_root": str(output_root)}
+    assert calls["run_stage"] == {
+        "project_dir": project_dir,
+        "stage_id": "08_outline_plan",
+        "force": False,
+    }
+
+
+def test_project_flag_without_value_defaults_to_demo_project(tmp_path, monkeypatch) -> None:
+    output_root = tmp_path / "outputs"
+    project_dir = output_root / "demo"
+    calls: dict[str, object] = {}
+
+    def fake_find_project_dir(project, output_root_arg=None):
+        calls["find_project_dir"] = {"project": project, "output_root": output_root_arg}
+        return project_dir
+
+    def fake_run_stage(resolved_project_dir, stage_id, *, force=False):
+        calls["run_stage"] = {"project_dir": resolved_project_dir, "stage_id": stage_id, "force": force}
+        return {"stage_id": stage_id, "status": "done", "outputs": []}
+
+    monkeypatch.setattr(cli, "find_project_dir", fake_find_project_dir)
+    monkeypatch.setattr(cli, "run_stage", fake_run_stage)
+
+    assert cli.main(["summary-reduce", "--project", "--output-root", str(output_root), "--no-deps"]) == 0
+
+    assert calls["find_project_dir"] == {"project": "demo", "output_root": str(output_root)}
+    assert calls["run_stage"] == {
+        "project_dir": project_dir,
+        "stage_id": "07_summary_reduce",
+        "force": False,
+    }
+
+
+def test_rerun_command_defaults_to_demo_project(tmp_path, monkeypatch) -> None:
+    output_root = tmp_path / "outputs"
+    project_dir = output_root / "demo"
+    calls: dict[str, object] = {}
+
+    def fake_find_project_dir(project, output_root_arg=None):
+        calls["find_project_dir"] = {"project": project, "output_root": output_root_arg}
+        return project_dir
+
+    def fake_run_pipeline(resolved_project_dir, *, from_stage=None, to_stage=None, force=False):
+        calls["run_pipeline"] = {
+            "project_dir": resolved_project_dir,
+            "from_stage": from_stage,
+            "to_stage": to_stage,
+            "force": force,
+        }
+        return [{"stage_id": from_stage, "status": "done"}]
+
+    monkeypatch.setattr(cli, "find_project_dir", fake_find_project_dir)
+    monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
+
+    assert cli.main(["rerun", "--steps", "6-8", "--output-root", str(output_root)]) == 0
+
+    assert calls["find_project_dir"] == {"project": "demo", "output_root": str(output_root)}
+    assert calls["run_pipeline"] == {
+        "project_dir": project_dir,
+        "from_stage": "06_shot_understanding",
+        "to_stage": "08_outline_plan",
+        "force": True,
+    }
+
+
 def test_run_command_accepts_numeric_step_range(tmp_path, monkeypatch) -> None:
     video = tmp_path / "tiny.mp4"
     video.write_bytes(b"fake-video")

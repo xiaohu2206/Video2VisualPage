@@ -11,8 +11,26 @@ from ..storage import atomic_write_json, read_json, read_jsonl, write_jsonl
 from ..utils.eventlog import log_event
 
 
+PLACEHOLDER_TOPICS = {"visual", "Visual timeline", "内容提取", "知识点整理", "重点回顾", "总结", "内容概览"}
+
+
 def _chunked(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [items[index : index + size] for index in range(0, len(items), size)] or [[]]
+
+
+def _meaningful_topics(topics: list[str]) -> list[str]:
+    return [topic for topic in topics if topic and topic not in PLACEHOLDER_TOPICS]
+
+
+def _suggested_chapter_count(cards: list[dict[str, Any]], unique_topics: list[str], chunk_size: int) -> int:
+    if not cards:
+        return 1
+    shot_count = len(cards)
+    meaningful_topic_count = len(_meaningful_topics(unique_topics))
+    chunk_based_count = (shot_count + max(1, chunk_size // 2) - 1) // max(1, chunk_size // 2)
+    note_density_count = (shot_count + 7) // 8
+    suggested = max(meaningful_topic_count, chunk_based_count, note_density_count, 1)
+    return min(6, shot_count, suggested)
 
 
 def run_summary_reduce(project_dir: str | Path) -> dict[str, Any]:
@@ -42,11 +60,11 @@ def run_summary_reduce(project_dir: str | Path) -> dict[str, Any]:
         important_shots.extend(summary.get("important_shots", []))
     unique_topics = list(dict.fromkeys(str(topic) for topic in topics if topic))
     if unique_topics == ["visual"] or unique_topics == ["Visual timeline"]:
-        unique_topics = ["Opening", "Development", "Key moments", "Closing"]
-    suggested = min(6, max(1, round(len(cards) / max(1, chunk_size / 2)))) if cards else 1
+        unique_topics = ["内容提取", "知识点整理", "重点回顾", "总结"]
+    suggested = _suggested_chapter_count(cards, unique_topics, chunk_size)
     global_summary = {
-        "video_main_theme": unique_topics[0] if unique_topics else "Video visual report",
-        "main_sections": unique_topics[:6] or ["Overview"],
+        "video_main_theme": unique_topics[0] if unique_topics else "视频博客笔记",
+        "main_sections": unique_topics[:6] or ["内容概览"],
         "suggested_chapter_count": suggested,
         "narrative_style": "structured_report",
         "important_shots": list(dict.fromkeys(important_shots))[:20],

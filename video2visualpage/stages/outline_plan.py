@@ -9,6 +9,14 @@ from ..storage import atomic_write_json, read_json, read_jsonl
 from ..utils.eventlog import log_event
 
 
+PLACEHOLDER_SECTIONS = {"visual", "Visual timeline", "内容提取", "知识点整理", "重点回顾", "总结", "内容概览"}
+
+
+def _meaningful_sections(global_summary: dict[str, Any]) -> list[str]:
+    sections = [str(section) for section in global_summary.get("main_sections") or [] if section]
+    return [section for section in sections if section not in PLACEHOLDER_SECTIONS]
+
+
 def _desired_chapter_count(config: dict[str, Any], global_summary: dict[str, Any], shot_count: int) -> int:
     raw = config.get("llm", {}).get("chapter_count", "auto")
     if raw != "auto":
@@ -16,8 +24,13 @@ def _desired_chapter_count(config: dict[str, Any], global_summary: dict[str, Any
             return min(8, max(1, int(raw)))
         except (TypeError, ValueError):
             pass
-    suggested = int(global_summary.get("suggested_chapter_count") or 1)
-    return min(8, max(1, min(suggested, shot_count or 1)))
+    try:
+        suggested = int(global_summary.get("suggested_chapter_count") or 1)
+    except (TypeError, ValueError):
+        suggested = 1
+    section_count = len(_meaningful_sections(global_summary))
+    auto_count = max(suggested, section_count, 1)
+    return min(8, max(1, min(auto_count, shot_count or 1)))
 
 
 def run_outline_plan(project_dir: str | Path) -> dict[str, Any]:
@@ -47,8 +60,8 @@ def run_outline_plan(project_dir: str | Path) -> dict[str, Any]:
             }
         )
     outline = {
-        "title": "Video Visual Report",
-        "description": "A static report generated from shots, subtitles, and keyframes.",
+        "title": "视频博客笔记",
+        "description": "由视频帧文字、字幕和知识点提取生成的静态笔记。",
         "chapters": chapters,
     }
     atomic_write_json(stage_dir / "outline.json", outline)

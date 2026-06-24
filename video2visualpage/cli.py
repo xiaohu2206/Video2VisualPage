@@ -19,6 +19,8 @@ from .progress import ProgressReporter
 from .stages import create_project, run_chapter_write, run_qa, run_static_render
 from .state import get_stage_record, load_run_state, set_stage_status, write_step_manifest
 
+DEFAULT_PROJECT_ID = "demo"
+
 
 def _print(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -28,12 +30,26 @@ def _default_output_root() -> Path:
     return repo_root() / "outputs"
 
 
+def _add_existing_project_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--project",
+        nargs="?",
+        const=DEFAULT_PROJECT_ID,
+        default=None,
+        help=f"Project directory or id under outputs. Defaults to {DEFAULT_PROJECT_ID}.",
+    )
+
+
 def _add_project_or_video_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--project", default=None, help="Project directory or id under outputs.")
+    _add_existing_project_arg(parser)
     parser.add_argument("--video", default=None, help="Input video path. Reuses a matching project or creates one.")
     parser.add_argument("--project-name", default=None, help="Project id prefix when --video is used.")
     parser.add_argument("--output-root", default=str(_default_output_root()), help="Output root directory.")
     parser.add_argument("--new-project", action="store_true", help="Deprecated; --video always overwrites the fixed project folder.")
+
+
+def _existing_project_from_args(args: argparse.Namespace) -> Path:
+    return find_project_dir(getattr(args, "project", None) or DEFAULT_PROJECT_ID, args.output_root)
 
 
 def _project_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Path:
@@ -43,10 +59,7 @@ def _project_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser
         parser.error("Use either --project or --video, not both.")
     if video:
         return create_project(video, project_name=getattr(args, "project_name", None), output_root=args.output_root)
-    if project:
-        return find_project_dir(project, args.output_root)
-    parser.error("Provide --project for an existing project or --video to create one.")
-    raise AssertionError("unreachable")
+    return _existing_project_from_args(args)
 
 
 def _record_direct_stage(project_dir: Path, stage_id: str, result: dict[str, Any]) -> dict[str, Any]:
@@ -86,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--force", action="store_true", help="Rerun completed stages.")
 
     resume = sub.add_parser("resume", help="Resume from the first incomplete stage.")
-    resume.add_argument("project", help="Project directory or id under outputs.")
+    resume.add_argument("project", nargs="?", default=None, help=f"Project directory or id under outputs. Defaults to {DEFAULT_PROJECT_ID}.")
     resume.add_argument("--output-root", default=str(_default_output_root()), help="Output root directory.")
     resume.add_argument("--to-stage", default=None, help="Last stage to run.")
     resume.add_argument("--steps", "--step-range", dest="step_range", default=None, help="Numeric stage range end, for example 1-5 or 6-11. For resume, the range end is used as --to-stage.")
@@ -99,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--no-deps", action="store_true", help="Do not auto-run missing dependency steps.")
 
     rerun = sub.add_parser("rerun", help="Rerun a stage range.")
-    rerun.add_argument("--project", required=True, help="Project directory or id under outputs.")
+    _add_existing_project_arg(rerun)
     rerun.add_argument("--from", dest="from_stage", default=None, help="First stage to rerun.")
     rerun.add_argument("--to", dest="to_stage", default=None, help="Last stage to rerun.")
     rerun.add_argument("--steps", "--step-range", dest="step_range", default=None, help="Numeric stage range, for example 1-5 or 6-11. Overrides --from/--to.")
@@ -115,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     qa.add_argument("--no-fix", action="store_true", help="Disable automatic repairs.")
 
     write_chapter = sub.add_parser("write-chapter", help="Regenerate one chapter.")
-    write_chapter.add_argument("--project", required=True, help="Project directory or id under outputs.")
+    _add_existing_project_arg(write_chapter)
     write_chapter.add_argument("--chapter-id", required=True, help="Chapter id, for example chapter_001.")
     write_chapter.add_argument("--output-root", default=str(_default_output_root()), help="Output root directory.")
 
@@ -179,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "resume":
-        project_dir = find_project_dir(args.project, args.output_root)
+        project_dir = _existing_project_from_args(args)
         to_stage = parse_stage_range(args.step_range)[1] if args.step_range else args.to_stage
         results = resume_pipeline(project_dir, to_stage=to_stage, force=args.force)
         _print({"project_dir": str(project_dir), "results": results})
@@ -193,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "rerun":
-        project_dir = find_project_dir(args.project, args.output_root)
+        project_dir = _existing_project_from_args(args)
         if not args.step_range and not args.from_stage:
             parser.error("rerun requires --from or --steps.")
         from_stage, to_stage = (parse_stage_range(args.step_range) if args.step_range else (args.from_stage, args.to_stage))
@@ -225,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "write-chapter":
-        project_dir = find_project_dir(args.project, args.output_root)
+        project_dir = _existing_project_from_args(args)
         _ensure_dependencies(project_dir, "09_chapter_write")
         result = run_chapter_write(project_dir, chapter_id=args.chapter_id)
         result = _record_direct_stage(project_dir, "09_chapter_write", result)

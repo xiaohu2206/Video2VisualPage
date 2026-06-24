@@ -188,7 +188,7 @@ def effective_model_config(config: dict[str, Any], model_role: str | None = None
     return _merge_env_config(config, model_role=role)
 
 
-PROMPT_SIGNATURE_VERSION = "2026-06-24-tagged-shot-analysis-output"
+PROMPT_SIGNATURE_VERSION = "2026-06-24-ocr-subtitle-note-output"
 PROMPT_SIGNATURE_FILES = (
     "shot_analysis_prompt.txt",
     "chapter_writer_prompt.txt",
@@ -263,6 +263,23 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     return value
 
 
+def _parse_json_value(text: str) -> Any:
+    stripped = text.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        fence = re.search(r"```(?:json)?\s*(.*?)```", stripped, flags=re.DOTALL | re.IGNORECASE)
+        if fence:
+            return _parse_json_value(fence.group(1))
+        start_candidates = [index for index in (stripped.find("{"), stripped.find("[")) if index >= 0]
+        if start_candidates:
+            start = min(start_candidates)
+            end = max(stripped.rfind("}"), stripped.rfind("]"))
+            if end > start:
+                return json.loads(stripped[start : end + 1])
+        raise
+
+
 def _extract_tag(text: str, tag: str) -> str | None:
     pattern = rf"<\s*{re.escape(tag)}(?:\s+[^>]*)?\s*>(.*?)<\s*/\s*{re.escape(tag)}\s*>"
     match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
@@ -332,6 +349,45 @@ def _tag_frame(text: str, tag: str, frames: list[str]) -> tuple[str | None, str 
     return None, "模型返回了推荐帧，但该镜头没有可用关键帧。"
 
 
+def _dedupe_texts(items: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = re.sub(r"\s+", " ", str(item)).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return deduped
+
+
+def _extract_ocr_texts(raw_text: str) -> list[str]:
+    try:
+        value = _parse_json_value(raw_text)
+    except Exception:
+        lines = [line.strip("- \t\r") for line in raw_text.splitlines()]
+        return _dedupe_texts([line for line in lines if line and not line.startswith("```")])
+
+    texts: list[str] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            text = node.get("text")
+            if isinstance(text, str) and text.strip():
+                texts.append(text)
+            for key in ("words_info", "ocr_result", "kv_result", "data", "items", "result"):
+                if key in node:
+                    visit(node[key])
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(value)
+    if not texts and isinstance(value, str):
+        texts.append(value)
+    return _dedupe_texts(texts)
+
+
 def _parse_tagged_shot_analysis(text: str, package: dict[str, Any]) -> dict[str, Any]:
     missing = [tag for tag in ("visual_summary", "merged_summary") if _extract_tag(text, tag) is None]
     if missing:
@@ -351,7 +407,7 @@ def _parse_tagged_shot_analysis(text: str, package: dict[str, Any]) -> dict[str,
         warnings.append(frame_warning)
 
     merged_summary = _tag_text(text, "merged_summary")
-    topic_tags = _tag_list(text, "topic_tags") or _keywords(merged_summary, limit=3) or ["视觉"]
+    topic_tags = _tag_list(text, "topic_tags") or _keywords(merged_summary, limit=3) or ["内容提取"]
     narrative_role = _tag_text(text, "narrative_role", "unknown").strip().lower()
     allowed_roles = {"introduction", "explanation", "demo", "transition", "conclusion", "unknown"}
     if narrative_role not in allowed_roles:
@@ -622,6 +678,8 @@ class LocalModelAdapter:
         raw_content = message.get("content")
         if isinstance(raw_content, list):
             raw_content = "".join(str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in raw_content)
+        if isinstance(raw_content, dict):
+            raw_content = json.dumps(raw_content, ensure_ascii=False)
         if not isinstance(raw_content, str) or not raw_content.strip():
             raise RuntimeError("LLM API response content is empty")
         return raw_content
@@ -654,16 +712,17 @@ class LocalModelAdapter:
         subtitle = str(package.get("subtitle_text") or "").strip()
         frames = list(package.get("frames") or [])
         time_range = package.get("time_range") or {}
-        duration = float(time_range.get("duration_sec") or 0.0)
         keys = _keywords(subtitle) if subtitle else []
-        subtitle_summary = _compact_text(subtitle, 100) if subtitle else "该镜头没有可用字幕。"
-        visual_summary = (
-            f"镜头 {shot_id} 在 {duration:.2f} 秒内提供了 {len(frames)} 张关键帧参考图。"
-            if frames
-            else f"镜头 {shot_id} 时长 {duration:.2f} 秒，但没有可用关键帧图像。"
-        )
-        merged = subtitle_summary if subtitle else visual_summary
-        importance = min(0.95, max(0.2, 0.35 + min(len(subtitle), 120) / 220.0 + min(len(frames), 2) * 0.08))
+        subtitle_summary = _compact_text(subtitle, 180) if subtitle else "该镜头没有可用字幕。"
+        visual_summary = "本地启发式模式无法读取关键帧文字；请使用 vision model 进行 OCR。"
+        if not frames:
+            visual_summary = "未提供可用于 OCR 的关键帧。"
+        merged = subtitle_summary if subtitle else "未提取到可用于笔记的文字内容。"
+        warnings = [str(item) for item in list(package.get("warnings") or []) if str(item).strip()]
+        warning = "local_heuristic_no_ocr: 本地启发式模式不会读取关键帧文字。"
+        if warning not in warnings:
+            warnings.append(warning)
+        importance = min(0.9, max(0.15, 0.25 + min(len(subtitle), 180) / 260.0))
         return {
             "shot_id": shot_id,
             "start_sec": time_range.get("start_sec"),
@@ -674,21 +733,95 @@ class LocalModelAdapter:
             "key_entities": keys[:4],
             "actions": [],
             "on_screen_text": [],
-            "topic_tags": keys[:3] or ["视觉"],
+            "topic_tags": keys[:3] or ["内容提取"],
             "narrative_role": "explanation" if subtitle else "unknown",
             "importance_score": round(importance, 3),
             "recommended_display_frame": frames[0] if frames else None,
-            "confidence": 0.55 if subtitle else 0.35,
-            "warnings": list(package.get("warnings") or []),
+            "confidence": 0.45 if subtitle else 0.2,
+            "warnings": warnings,
+        }
+
+    def _is_ocr_model(self) -> bool:
+        return "ocr" in self.model.lower()
+
+    def _ocr_frame_texts(self, package: dict[str, Any], frame: str) -> list[str]:
+        raw = self._chat_raw(
+            "shot_understanding",
+            "你是 OCR 引擎。只提取图片中可读文字，不要解释，不要补充图片外信息。",
+            {
+                "shot_id": package.get("shot_id"),
+                "frame": frame,
+                "task": "extract_visible_text",
+            },
+            images=[frame],
+            response_instruction="只输出图片中的文字识别结果；看不清的文字不要猜。",
+            json_response=False,
+            preserve_json_keys=False,
+        )
+        return _extract_ocr_texts(raw)
+
+    def _ocr_analyze_shot(self, package: dict[str, Any]) -> dict[str, Any]:
+        shot_id = str(package.get("shot_id") or "")
+        time_range = package.get("time_range") or {}
+        frames = [str(frame) for frame in list(package.get("frames") or [])]
+        subtitle = str(package.get("subtitle_text") or "").strip()
+        warnings = [str(item) for item in list(package.get("warnings") or []) if str(item).strip()]
+        frame_texts: list[tuple[str, list[str]]] = []
+        for frame in frames[: self.max_images_per_shot]:
+            try:
+                frame_texts.append((frame, self._ocr_frame_texts(package, frame)))
+            except Exception as exc:  # noqa: BLE001 - keep per-frame OCR failures visible in output.
+                warnings.append(f"ocr_failed:{Path(frame).name}:{exc}")
+                frame_texts.append((frame, []))
+
+        on_screen_text = _dedupe_texts([text for _, texts in frame_texts for text in texts])
+        subtitle_summary = _compact_text(subtitle, 240) if subtitle else "该镜头没有可用字幕。"
+        if not subtitle:
+            warnings.append("该镜头无字幕")
+        if not on_screen_text:
+            warnings.append("关键帧未识别出有效文字内容。")
+
+        visual_summary = "\n".join(f"- {text}" for text in on_screen_text) if on_screen_text else "未提取到可读画面文字。"
+        note_parts: list[str] = []
+        note_parts.extend(f"- {text}" for text in on_screen_text)
+        if subtitle:
+            note_parts.append(f"- 字幕：{subtitle}")
+        merged_summary = "\n".join(note_parts) if note_parts else "无可用知识点内容。"
+
+        keywords = _keywords(" ".join([*on_screen_text, subtitle]), limit=8)
+        best_frame = None
+        if frame_texts:
+            best_frame = max(frame_texts, key=lambda item: len(item[1]))[0]
+        confidence = 0.85 if on_screen_text else (0.45 if subtitle else 0.0)
+        importance = min(0.95, max(confidence, 0.25 + len(on_screen_text) * 0.08 + min(len(subtitle), 160) / 320.0))
+        return {
+            "shot_id": shot_id,
+            "start_sec": time_range.get("start_sec"),
+            "end_sec": time_range.get("end_sec"),
+            "visual_summary": visual_summary,
+            "subtitle_summary": subtitle_summary,
+            "merged_summary": merged_summary,
+            "key_entities": keywords[:6],
+            "actions": ["文字提取"] if on_screen_text else [],
+            "on_screen_text": on_screen_text,
+            "topic_tags": keywords[:3] or (["文字提取"] if on_screen_text else ["内容提取"]),
+            "narrative_role": "explanation" if on_screen_text or subtitle else "unknown",
+            "importance_score": round(importance, 3),
+            "recommended_display_frame": best_frame,
+            "confidence": round(confidence, 3),
+            "warnings": _dedupe_texts(warnings),
+            "model_output_format": "ocr_text_v1",
         }
 
     def analyze_shot(self, package: dict[str, Any]) -> dict[str, Any]:
         def run() -> dict[str, Any]:
             if self.provider == "local_heuristic":
                 return self._local_analyze_shot(package)
+            if self._is_ocr_model():
+                return self._ocr_analyze_shot(package)
             prompt = _read_prompt(
                 "shot_analysis_prompt.txt",
-                "你是单镜头理解 Agent。请用标签协议输出一个镜头的必要分析数据，摘要字段允许 Markdown。",
+                "你是视频笔记内容提取 Agent。请只根据关键帧文字和字幕输出可用于博客笔记的标签协议内容。",
             )
             raw = self._chat_text("shot_understanding", prompt, package, images=list(package.get("frames") or []))
             result = _parse_tagged_shot_analysis(raw, package)
@@ -719,12 +852,12 @@ class LocalModelAdapter:
             summary = str(card.get("merged_summary") or "").strip()
             if summary:
                 summaries.append(summary)
-        main_topics = _keywords(" ".join(tags + summaries), limit=5) or ["视频时间线"]
+        main_topics = _keywords(" ".join(tags + summaries), limit=5) or ["视频笔记"]
         return {
             "chunk_id": chunk_id,
             "shot_range": [cards[0]["shot_id"], cards[-1]["shot_id"]] if cards else [],
             "main_topics": main_topics,
-            "summary": _compact_text(" ".join(summaries), 280) if summaries else "该片段包含缺少字幕文本的视觉镜头。",
+            "summary": _compact_text(" ".join(summaries), 280) if summaries else "该片段没有提取到可用于笔记的文字内容。",
             "important_shots": [item["shot_id"] for item in important],
         }
 
@@ -735,7 +868,8 @@ class LocalModelAdapter:
             if self.provider == "local_heuristic":
                 return self._local_summarize_chunk(chunk_id, cards)
             prompt = (
-                "你是摘要压缩 Agent。请把提供的镜头卡片压缩成用于报告规划的简洁中文摘要。"
+                "你是博客笔记摘要压缩 Agent。请把提供的镜头卡片压缩成用于博客目录规划的简洁中文摘要。"
+                "只整合镜头卡片中的 OCR、字幕和知识点，不要补充画面人物、构图或场景分析。"
                 "只返回严格 JSON，字段为 chunk_id、shot_range、main_topics、summary、important_shots。"
                 "main_topics、summary 等自然语言字段必须使用简体中文。"
             )
@@ -752,7 +886,7 @@ class LocalModelAdapter:
         if body_source:
             body = _compact_text(body_source, 900)
         else:
-            body = "本章节来自当前文字或视觉标注较少的镜头。"
+            body = "本章节没有提取到足够的画面文字或字幕内容。"
         return {
             "chapter_id": chapter["chapter_id"],
             "title": chapter["title"],
@@ -771,7 +905,7 @@ class LocalModelAdapter:
                 return self._local_write_chapter(chapter, cards, global_summary)
             prompt = _read_prompt(
                 "chapter_writer_prompt.txt",
-                "你是章节写作 Agent。请为一个报告章节返回严格 JSON，所有自然语言字段使用简体中文。",
+                "你是博客笔记章节写作 Agent。请为一个博客笔记章节返回严格 JSON，所有自然语言字段使用简体中文。",
             )
             result = self._chat_json("chapter_write", prompt, payload)
             return _require_keys(

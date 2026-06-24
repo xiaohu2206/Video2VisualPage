@@ -86,42 +86,54 @@ def test_model_adapter_accepts_tagged_markdown_shot_output(tmp_path, monkeypatch
     def fake_chat_text(stage, system_prompt, payload, images=None):
         assert stage == "shot_understanding"
         assert "不要返回 JSON" in system_prompt
+        assert "只关注“画面中的文字/OCR 内容”和“字幕文本”" in system_prompt
         assert "<visual_summary>" in system_prompt
         assert payload["shot_id"] == "shot_001"
         assert images == package["frames"]
         return """
 <visual_summary>
-### 画面观察
-- **主体**：讲解者站在白板前。
-- **环境**：室内演示场景。
+## 目录 CONTENTS
+- [L1] 微压缩 (Microcompact)
+  - 零成本规则清理，保护服务端缓存
+- [L2] 会话记忆 (Session Memory)
+  - 事实结构化提取，精细边界锁定
 </visual_summary>
 
 <subtitle_summary>
-字幕强调“产品核心能力”。
+这里展示产品的核心能力。
 </subtitle_summary>
 
 <merged_summary>
-### 镜头作用
-这个镜头把视觉演示和字幕说明合并，用于引出后续功能细节。
+## 目录 CONTENTS
+- [L1] 微压缩 (Microcompact)：零成本规则清理，保护服务端缓存
+- [L2] 会话记忆 (Session Memory)：事实结构化提取，精细边界锁定
+
+产品核心能力围绕规则清理和会话记忆展开。
 </merged_summary>
 
 <key_entities>
-- 讲解者
-- 白板
+- 微压缩
+- 会话记忆
+- Microcompact
+- Session Memory
 </key_entities>
 
 <actions>
-- 讲解
-- 展示
+- 分层
+- 定义
 </actions>
 
 <on_screen_text>
-- 核心能力
+- 目录 CONTENTS
+- [L1] 微压缩 (Microcompact)
+- 零成本规则清理，保护服务端缓存
+- [L2] 会话记忆 (Session Memory)
+- 事实结构化提取，精细边界锁定
 </on_screen_text>
 
 <topic_tags>
 - 产品能力
-- 演示
+- 知识目录
 </topic_tags>
 
 <narrative_role>
@@ -150,14 +162,72 @@ shot_001_b.jpg
 
     assert result["shot_id"] == "shot_001"
     assert result["start_sec"] == 1.2
-    assert "### 画面观察" in result["visual_summary"]
-    assert "**主体**" in result["visual_summary"]
-    assert result["key_entities"] == ["讲解者", "白板"]
-    assert result["topic_tags"] == ["产品能力", "演示"]
+    assert "## 目录 CONTENTS" in result["visual_summary"]
+    assert "[L1] 微压缩" in result["merged_summary"]
+    assert result["key_entities"] == ["微压缩", "会话记忆", "Microcompact", "Session Memory"]
+    assert result["actions"] == ["分层", "定义"]
+    assert result["topic_tags"] == ["产品能力", "知识目录"]
     assert result["recommended_display_frame"] == "shot_package/keyframes/shot_001_b.jpg"
     assert result["importance_score"] == 0.82
     assert result["confidence"] == 0.91
     assert result["model_output_format"] == "tagged_markdown_v1"
+
+
+def test_model_adapter_supports_ocr_model_output(tmp_path, monkeypatch) -> None:
+    adapter = LocalModelAdapter(
+        tmp_path,
+        {
+            "provider": "openai_compatible",
+            "api_key": "test-key",
+            "model": "qwen3.5-ocr",
+            "use_env": False,
+            "max_retries": 0,
+            "max_images_per_shot": 2,
+        },
+        model_role="vision",
+    )
+    package = {
+        "shot_id": "shot_004",
+        "time_range": {"start_sec": 10.0, "end_sec": 12.0, "duration_sec": 2.0},
+        "frames": ["shot_split/keyframes/shot_004_a.jpg", "shot_split/keyframes/shot_004_b.jpg"],
+        "subtitle_text": "也就是上下文被撑爆了",
+        "warnings": [],
+    }
+    calls: list[list[str] | None] = []
+
+    def fake_chat_raw(stage, system_prompt, payload, *, images=None, response_instruction, json_response, preserve_json_keys):
+        assert stage == "shot_understanding"
+        assert "OCR" in system_prompt
+        calls.append(images)
+        if images == ["shot_split/keyframes/shot_004_a.jpg"]:
+            return """
+```json
+[
+  {"text": "LLM"},
+  {"text": "不是模型太笨"},
+  {"text": "而是脑容量"}
+]
+```
+"""
+        return """
+```json
+[
+  {"text": "不是模型太笨"},
+  {"text": "上下文"}
+]
+```
+"""
+
+    monkeypatch.setattr(adapter, "_chat_raw", fake_chat_raw)
+
+    result = adapter.analyze_shot(package)
+
+    assert calls == [["shot_split/keyframes/shot_004_a.jpg"], ["shot_split/keyframes/shot_004_b.jpg"]]
+    assert result["model_output_format"] == "ocr_text_v1"
+    assert result["on_screen_text"] == ["LLM", "不是模型太笨", "而是脑容量", "上下文"]
+    assert "也就是上下文被撑爆了" in result["merged_summary"]
+    assert result["recommended_display_frame"] == "shot_split/keyframes/shot_004_a.jpg"
+    assert result["confidence"] == 0.85
 
 
 def test_pipeline_marks_shot_understanding_failed_on_model_failure(tmp_path, monkeypatch) -> None:
