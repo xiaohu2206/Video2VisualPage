@@ -1,6 +1,48 @@
 # Video2VisualPage
 
-Local JSON/JSONL pipeline for turning a video into a static visual report. The project runs without a database: every step reads files from `outputs/{project_id}/{step_name}/` and writes its own JSON, JSONL, images, HTML, and logs back to disk.
+Video2VisualPage 是一个本地运行的视频转可视化网页报告工具。它会把一段视频拆解为媒体信息、镜头、字幕、关键帧、镜头理解、全局摘要、章节大纲和章节正文，最后渲染成可以直接打开的静态 HTML 报告。
+
+项目采用纯文件流水线，不依赖数据库。每个步骤都会从 `outputs/{project_id}/{step_name}/` 读取上游产物，并把自己的 JSON、JSONL、图片、HTML 和日志写回磁盘，方便单步调试、断点续跑、结果追溯和后续二次生成。
+
+适合的使用场景：
+
+- 把课程、演示、访谈、技术讲解视频转换成图文结构化笔记。
+- 为长视频生成章节目录、重点摘要、关键帧证据和可浏览报告。
+- 在本地保留完整中间产物，便于复查模型输入输出和镜头引用。
+- 基于同一批 JSON/JSONL 结果继续生成 HTML、PDF、PPT 或其他内容形态。
+
+## 效果预览
+
+![视频与生成报告并排预览](docs/images/截图1.png)
+
+左侧是原始视频播放画面，右侧是生成后的静态可视化报告：首页包含标题、摘要指标、目录和章节正文，并在侧栏保留关联镜头证据。
+
+![章节正文与关键帧证据](docs/images/截图2.png)
+
+章节页会把模型生成的正文、关键点和引用镜头组织在同一个阅读视图中，方便从文字结论回看对应的视频关键帧。
+
+![长报告页面效果](docs/images/截图3.png)
+
+最终产物是一个可直接打开的本地 HTML 页面，适合浏览、归档，也可以继续作为 PDF 或其他静态内容的生成来源。
+
+## 核心流程
+
+完整流程分为 12 个步骤：
+
+1. 初始化项目目录和运行状态。
+2. 探测视频时长、帧率、分辨率、音频等基础信息。
+3. 使用 OpenCV 工具切分镜头并抽取关键帧。
+4. 读取侧边字幕或调用在线 ASR，生成标准化字幕。
+5. 按时间重叠把字幕对齐到镜头。
+6. 构建模型可读的 `shot_packages.jsonl`。
+7. 使用视觉模型理解单个镜头，生成结构化镜头卡片。
+8. 对镜头卡片做分块摘要和全局摘要。
+9. 规划报告目录，并把镜头分配到章节。
+10. 按章节生成正文 JSON。
+11. 渲染静态 HTML 报告。
+12. 校验 JSON/JSONL、图片引用、章节内容和最终 HTML。
+
+这个设计的核心是把“视频理解”拆成可复用的中间文件：镜头卡片、摘要、大纲和章节都可以单独检查、重跑或替换模型后重新生成。
 
 ## Install
 

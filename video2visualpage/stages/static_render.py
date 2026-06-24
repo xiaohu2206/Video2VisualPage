@@ -11,6 +11,9 @@ from ..storage import atomic_write_json, atomic_write_text, read_json, read_json
 from ..utils.eventlog import log_error, log_event
 
 
+GALLERY_VISIBLE_THUMBS = 6
+
+
 STYLE = """
 :root {
   color-scheme: light;
@@ -229,6 +232,11 @@ p { margin: 0 0 16px; }
   min-width: 0;
   position: sticky;
   top: 24px;
+  padding: 14px;
+  border: 1px solid rgb(216 224 230 / 90%);
+  border-radius: var(--radius);
+  background: rgb(255 255 255 / 82%);
+  box-shadow: 0 16px 42px rgb(29 45 57 / 8%);
 }
 .frame-board-title {
   display: flex;
@@ -237,12 +245,25 @@ p { margin: 0 0 16px; }
   gap: 14px;
   margin: 0 0 12px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 .frame-board-title strong {
   color: var(--ink);
-  font-size: 14px;
+  font-size: 13px;
   letter-spacing: 0;
+}
+.frame-count {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
 }
 .frame-main,
 .frame-thumb {
@@ -250,7 +271,7 @@ p { margin: 0 0 16px; }
 }
 .frame-main {
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   overflow: hidden;
   background: var(--paper);
 }
@@ -262,34 +283,96 @@ p { margin: 0 0 16px; }
   object-fit: contain;
   background: #e8edf1;
 }
-.frame-main figcaption,
-.frame-thumb figcaption {
+.frame-main figcaption {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
   overflow: hidden;
-  padding: 7px 9px;
+  padding: 8px 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .frame-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 12px;
 }
 .frame-thumb {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  overflow: hidden;
-  background: var(--paper);
+  min-width: 0;
 }
 .frame-thumb img {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
   object-fit: contain;
   background: #e8edf1;
+}
+.frame-thumb figcaption {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow: hidden;
+  padding: 5px 1px 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.frame-more {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.frame-more summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper-soft);
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  list-style: none;
+  padding: 8px 10px;
+}
+.frame-more summary::-webkit-details-marker {
+  display: none;
+}
+.frame-more summary::after {
+  content: "展开";
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+.frame-more[open] summary::after {
+  content: "收起";
+}
+.frame-drawer {
+  max-height: 330px;
+  margin-top: 10px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+.frame-drawer::-webkit-scrollbar {
+  width: 6px;
+}
+.frame-drawer::-webkit-scrollbar-track {
+  background: transparent;
+}
+.frame-drawer::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+}
+.frame-drawer::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 .key-points {
   border: 1px solid rgb(139 196 188 / 55%);
@@ -376,6 +459,8 @@ p { margin: 0 0 16px; }
   .frame-board { position: static; }
   .chapter-section { break-inside: avoid; }
   .frame-main img { max-height: 260px; }
+  .frame-board { max-height: none; overflow: visible; }
+  .frame-drawer { max-height: none; overflow: visible; padding-right: 0; }
 }
 @media (max-width: 900px) {
   .report-shell { padding: 24px 16px 52px; }
@@ -392,8 +477,7 @@ p { margin: 0 0 16px; }
   h1 { font-size: 34px; }
   .chapter-layout { grid-template-columns: 1fr; gap: 24px; }
   .chapter-copy { max-width: none; }
-  .frame-board { position: static; }
-  .frame-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .frame-board { max-height: none; overflow: visible; position: static; }
 }
 @media (max-width: 560px) {
   .report-shell { padding: 0; }
@@ -410,7 +494,8 @@ p { margin: 0 0 16px; }
   .toc a { grid-template-columns: 36px minmax(0, 1fr); }
   .chapter-section { padding: 34px 18px 42px; }
   .chapter-header { padding-left: 14px; }
-  .frame-grid { grid-template-columns: 1fr; }
+  .frame-board { padding: 12px; }
+  .frame-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .frame-main img { max-height: none; }
 }
 """.strip()
@@ -641,11 +726,9 @@ def _chapter_images(
     return images
 
 
-def _render_gallery(images: list[dict[str, str]], chapter_title: str) -> str:
-    if not images:
+def _render_thumb_grid(items: list[dict[str, str]]) -> str:
+    if not items:
         return ""
-    primary = images[0]
-    thumbs = images[1:]
     thumbs_html = "\n".join(
         f"""
 <figure class="frame-thumb">
@@ -653,17 +736,38 @@ def _render_gallery(images: list[dict[str, str]], chapter_title: str) -> str:
   <figcaption>{html.escape(item['label'])}</figcaption>
 </figure>
 """.strip()
-        for item in thumbs
+        for item in items
     )
-    grid_html = f'<div class="frame-grid">{thumbs_html}</div>' if thumbs_html else ""
+    return f'<div class="frame-grid">{thumbs_html}</div>'
+
+
+def _render_gallery(images: list[dict[str, str]], chapter_title: str) -> str:
+    if not images:
+        return ""
+    primary = images[0]
+    thumbs = images[1:]
+    visible_thumbs = thumbs[:GALLERY_VISIBLE_THUMBS]
+    hidden_thumbs = thumbs[GALLERY_VISIBLE_THUMBS:]
+    grid_html = _render_thumb_grid(visible_thumbs)
+    more_html = (
+        f"""
+<details class="frame-more">
+  <summary>还有 {len(hidden_thumbs)} 张关键帧</summary>
+  <div class="frame-drawer">{_render_thumb_grid(hidden_thumbs)}</div>
+</details>
+""".strip()
+        if hidden_thumbs
+        else ""
+    )
     return f"""
 <aside class="frame-board" aria-label="{html.escape(chapter_title)} 关键帧">
-  <div class="frame-board-title"><strong>关键帧</strong><span>{len(images)} 张视觉证据</span></div>
+  <div class="frame-board-title"><strong>视觉证据</strong><span class="frame-count">{len(images)} 张</span></div>
   <figure class="frame-main">
     <img src="{html.escape(primary['src'])}" alt="{html.escape(primary['alt'])}" loading="lazy" />
     <figcaption>{html.escape(primary['label'])}</figcaption>
   </figure>
   {grid_html}
+  {more_html}
 </aside>
 """.strip()
 

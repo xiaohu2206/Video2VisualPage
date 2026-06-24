@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from video2visualpage.stages.static_render import _render_html, _render_markdown
+from video2visualpage.stages.static_render import _render_gallery, _render_html, _render_markdown
 
 
 def test_render_markdown_headings_and_emphasis() -> None:
@@ -90,9 +90,31 @@ def test_render_html_uses_all_chapter_keyframes(tmp_path) -> None:
 
     rendered = _render_html(project_dir, output_dir, outline, chapters, True, analysis_by_id, packages_by_id)
 
-    assert "关键帧" in rendered
+    assert "视觉证据" in rendered
     assert "3 张" in rendered
     assert "assets/images/shot_001_a.jpg" in rendered
     assert "assets/images/shot_001_b.jpg" in rendered
     assert "assets/images/shot_002_a.jpg" in rendered
     assert rendered.count("<img ") == 3
+
+
+def test_render_gallery_collapses_extra_keyframes() -> None:
+    images = [
+        {
+            "src": f"assets/images/shot_{index:03d}.jpg",
+            "label": f"shot_{index:03d}",
+            "alt": f"shot {index:03d}",
+        }
+        for index in range(1, 11)
+    ]
+
+    rendered = _render_gallery(images, "章节")
+
+    assert "视觉证据" in rendered
+    assert "10 张" in rendered
+    assert "frame-count" in rendered
+    assert "frame-more" in rendered
+    assert "frame-drawer" in rendered
+    assert "还有 3 张关键帧" in rendered
+    assert "assets/images/shot_010.jpg" in rendered
+    assert rendered.count("<img ") == 10
