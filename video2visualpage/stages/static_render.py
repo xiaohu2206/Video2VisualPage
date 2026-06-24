@@ -14,70 +14,234 @@ from ..utils.eventlog import log_error, log_event
 STYLE = """
 :root {
   color-scheme: light;
-  --ink: #16202a;
-  --muted: #64717f;
-  --line: #d9e1e8;
-  --panel: #f6f8fb;
+  --ink: #14191f;
+  --ink-soft: #2d3741;
+  --muted: #66727f;
+  --faint: #8a96a3;
+  --line: #d8e0e6;
+  --line-strong: #b9c5ce;
+  --panel: #f3f6f7;
   --paper: #ffffff;
-  --accent: #0f766e;
-  --accent-soft: #e4f3ef;
+  --paper-soft: #f8fafb;
+  --accent: #0b766d;
+  --accent-strong: #075c55;
+  --accent-soft: #e5f3ef;
+  --accent-line: #8bc4bc;
+  --code-bg: #eef2f5;
+  --shadow: 0 24px 70px rgb(29 45 57 / 10%);
+  --radius: 8px;
+  --radius-sm: 6px;
 }
 * { box-sizing: border-box; }
+html {
+  scroll-behavior: smooth;
+}
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-  line-height: 1.68;
+  line-height: 1.7;
   color: var(--ink);
-  background: #fbfcfd;
+  background:
+    linear-gradient(180deg, #f2f5f6 0%, #eef3f1 46%, #f7f8f9 100%);
 }
-article {
-  max-width: 1180px;
+a {
+  color: var(--accent-strong);
+  text-decoration: none;
+  text-underline-offset: 3px;
+}
+a:hover {
+  text-decoration: underline;
+}
+a:focus-visible {
+  outline: 3px solid rgb(11 118 109 / 28%);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+.report-shell {
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 52px 28px 80px;
+  padding: 40px 28px 72px;
 }
-h1 { font-size: 36px; margin: 0 0 12px; letter-spacing: 0; }
-h2 { font-size: 25px; margin: 0 0 14px; letter-spacing: 0; line-height: 1.25; }
-h3 { font-size: 20px; margin: 28px 0 10px; letter-spacing: 0; }
-h4 { font-size: 18px; margin: 22px 0 8px; letter-spacing: 0; }
-p { margin: 0 0 16px; }
-nav {
-  border-top: 1px solid var(--line);
+.report-page {
+  background: rgb(255 255 255 / 88%);
+  border: 1px solid rgb(216 224 230 / 88%);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.report-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 390px);
+  gap: 44px;
+  padding: 48px 46px 42px;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / 92%), rgb(240 246 247 / 88%));
   border-bottom: 1px solid var(--line);
-  padding: 18px 0;
-  margin: 28px 0 36px;
 }
-nav ol { margin: 0; padding-left: 22px; }
-a { color: var(--accent); text-decoration: none; }
-.summary { color: var(--muted); font-size: 17px; }
+.hero-copy {
+  min-width: 0;
+}
+.eyebrow {
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 700;
+  margin: 0 0 16px;
+}
+h1 {
+  font-size: clamp(32px, 5vw, 58px);
+  line-height: 1.04;
+  margin: 0 0 18px;
+  letter-spacing: 0;
+}
+h2 {
+  font-size: 27px;
+  margin: 0;
+  letter-spacing: 0;
+  line-height: 1.24;
+}
+h3 { font-size: 20px; margin: 30px 0 10px; letter-spacing: 0; line-height: 1.35; }
+h4 { font-size: 18px; margin: 24px 0 8px; letter-spacing: 0; line-height: 1.4; }
+p { margin: 0 0 16px; }
+.summary {
+  color: var(--ink-soft);
+  font-size: 18px;
+  line-height: 1.75;
+  max-width: 76ch;
+}
+.report-stats {
+  display: grid;
+  align-content: start;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgb(255 255 255 / 72%);
+}
+.report-stats div {
+  min-width: 0;
+  padding: 18px 18px 16px;
+  border-left: 1px solid var(--line);
+}
+.report-stats div:first-child {
+  border-left: 0;
+}
+.report-stats dt {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+.report-stats dd {
+  color: var(--ink);
+  font-size: 28px;
+  font-weight: 750;
+  line-height: 1;
+  margin: 0;
+}
+.toc {
+  padding: 26px 46px 30px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+.toc-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.toc-header strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+.toc ol {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 30px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.toc li {
+  min-width: 0;
+  border-top: 1px solid var(--line);
+}
+.toc a {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 13px 0;
+  color: var(--ink);
+  text-decoration: none;
+}
+.toc a:hover {
+  color: var(--accent-strong);
+}
+.toc-index {
+  color: var(--accent-strong);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.toc-title {
+  overflow-wrap: anywhere;
+}
+.chapters {
+  background: var(--paper);
+}
 .chapter-section {
   border-top: 1px solid var(--line);
-  padding: 44px 0 50px;
+  padding: 50px 46px 56px;
+  scroll-margin-top: 20px;
+}
+.chapter-section:first-child {
+  border-top: 0;
 }
 .chapter-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
-  gap: 34px;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  gap: 48px;
   align-items: start;
 }
 .chapter-copy {
   min-width: 0;
-  max-width: 68ch;
+  max-width: 74ch;
+}
+.chapter-kicker {
+  color: var(--accent-strong);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.chapter-header {
+  border-left: 4px solid var(--accent-line);
+  padding-left: 18px;
+  margin-bottom: 26px;
+}
+.chapter-body {
+  color: var(--ink-soft);
+  font-size: 16px;
 }
 .frame-board {
   min-width: 0;
+  position: sticky;
+  top: 24px;
 }
 .frame-board-title {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 14px;
-  margin: 2px 0 10px;
+  margin: 0 0 12px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .frame-board-title strong {
   color: var(--ink);
-  font-size: 13px;
+  font-size: 14px;
   letter-spacing: 0;
 }
 .frame-main,
@@ -86,7 +250,7 @@ a { color: var(--accent); text-decoration: none; }
 }
 .frame-main {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   overflow: hidden;
   background: var(--paper);
 }
@@ -94,9 +258,9 @@ a { color: var(--accent); text-decoration: none; }
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
-  max-height: 240px;
-  object-fit: cover;
-  background: var(--panel);
+  max-height: 286px;
+  object-fit: contain;
+  background: #e8edf1;
 }
 .frame-main figcaption,
 .frame-thumb figcaption {
@@ -116,7 +280,7 @@ a { color: var(--accent); text-decoration: none; }
 }
 .frame-thumb {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   overflow: hidden;
   background: var(--paper);
 }
@@ -124,15 +288,19 @@ a { color: var(--accent); text-decoration: none; }
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
-  object-fit: cover;
-  background: var(--panel);
+  object-fit: contain;
+  background: #e8edf1;
 }
 .key-points {
-  border-left: 3px solid var(--accent);
+  border: 1px solid rgb(139 196 188 / 55%);
+  border-left: 4px solid var(--accent);
   background: var(--accent-soft);
-  border-radius: 0 8px 8px 0;
-  margin-top: 22px;
-  padding: 14px 18px;
+  border-radius: var(--radius);
+  margin-top: 26px;
+  padding: 16px 18px;
+}
+.key-points strong {
+  color: var(--accent-ink);
 }
 .key-points ul {
   margin: 8px 0 0;
@@ -159,8 +327,8 @@ a { color: var(--accent); text-decoration: none; }
   font-weight: 700;
 }
 .chapter-body code {
-  background: #eef2f7;
-  border-radius: 4px;
+  background: var(--code-bg);
+  border-radius: 5px;
   padding: 1px 5px;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.92em;
@@ -179,28 +347,69 @@ a { color: var(--accent); text-decoration: none; }
   padding: 0;
 }
 .chapter-body blockquote {
-  border-left: 4px solid var(--line);
+  border-left: 4px solid var(--accent-line);
   color: var(--muted);
   margin: 0 0 16px;
   padding: 2px 0 2px 16px;
 }
+.chapter-body hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 28px 0;
+}
 .shot-refs {
   color: var(--muted);
   font-size: 13px;
+  margin-top: 18px;
   overflow-wrap: anywhere;
 }
+@page {
+  margin: 18mm;
+}
 @media print {
-  article { max-width: none; padding: 24px; }
+  body { background: #fff; }
+  .report-shell { max-width: none; padding: 0; }
+  .report-page { border: 0; box-shadow: none; border-radius: 0; }
+  .report-hero,
+  .toc,
+  .chapter-section { padding-left: 0; padding-right: 0; }
+  .frame-board { position: static; }
+  .chapter-section { break-inside: avoid; }
   .frame-main img { max-height: 260px; }
 }
 @media (max-width: 900px) {
-  article { padding: 34px 18px 56px; }
-  h1 { font-size: 30px; }
+  .report-shell { padding: 24px 16px 52px; }
+  .report-page { border-radius: var(--radius); }
+  .report-hero {
+    grid-template-columns: 1fr;
+    gap: 28px;
+    padding: 34px 24px;
+  }
+  .report-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .toc { padding: 24px; }
+  .toc ol { grid-template-columns: 1fr; }
+  .chapter-section { padding: 38px 24px 44px; }
+  h1 { font-size: 34px; }
   .chapter-layout { grid-template-columns: 1fr; gap: 24px; }
   .chapter-copy { max-width: none; }
+  .frame-board { position: static; }
   .frame-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 560px) {
+  .report-shell { padding: 0; }
+  .report-page { border-left: 0; border-right: 0; border-radius: 0; box-shadow: none; }
+  .report-hero { padding: 28px 18px 30px; }
+  .summary { font-size: 16px; }
+  .report-stats { grid-template-columns: 1fr; }
+  .report-stats div {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+  .report-stats div:first-child { border-top: 0; }
+  .toc { padding: 22px 18px; }
+  .toc a { grid-template-columns: 36px minmax(0, 1fr); }
+  .chapter-section { padding: 34px 18px 42px; }
+  .chapter-header { padding-left: 14px; }
   .frame-grid { grid-template-columns: 1fr; }
   .frame-main img { max-height: none; }
 }
@@ -449,7 +658,7 @@ def _render_gallery(images: list[dict[str, str]], chapter_title: str) -> str:
     grid_html = f'<div class="frame-grid">{thumbs_html}</div>' if thumbs_html else ""
     return f"""
 <aside class="frame-board" aria-label="{html.escape(chapter_title)} 关键帧">
-  <div class="frame-board-title"><strong>关键帧</strong><span>{len(images)} 张</span></div>
+  <div class="frame-board-title"><strong>关键帧</strong><span>{len(images)} 张视觉证据</span></div>
   <figure class="frame-main">
     <img src="{html.escape(primary['src'])}" alt="{html.escape(primary['alt'])}" loading="lazy" />
     <figcaption>{html.escape(primary['label'])}</figcaption>
@@ -471,28 +680,44 @@ def _render_html(
     analysis_by_id = analysis_by_id or {}
     packages_by_id = packages_by_id or {}
     outline_by_id = {str(chapter.get("chapter_id")): chapter for chapter in outline.get("chapters", [])}
+    report_title = str(outline.get("title") or "视频博客笔记")
+    report_description = str(outline.get("description") or "")
     nav_items = "\n".join(
-        f'<li><a href="#{html.escape(chapter["chapter_id"])}">{html.escape(chapter["title"])}</a></li>'
-        for chapter in chapters
+        f"""
+<li>
+  <a href="#{html.escape(str(chapter.get('chapter_id') or f'chapter_{index:03d}'))}">
+    <span class="toc-index">{index:02d}</span>
+    <span class="toc-title">{html.escape(str(chapter.get("title") or "章节"))}</span>
+  </a>
+</li>
+""".strip()
+        for index, chapter in enumerate(chapters, start=1)
     )
     sections: list[str] = []
-    for chapter in chapters:
+    image_count = 0
+    for index, chapter in enumerate(chapters, start=1):
+        chapter_id = str(chapter.get("chapter_id") or f"chapter_{index:03d}")
         chapter_title = str(chapter.get("title") or "章节")
         outline_chapter = outline_by_id.get(str(chapter.get("chapter_id")))
         images = _chapter_images(project_dir, output_dir, chapter, outline_chapter, analysis_by_id, packages_by_id)
+        image_count += len(images)
         gallery_html = _render_gallery(images, chapter_title)
         points = "".join(f"<li>{html.escape(str(point))}</li>" for point in chapter.get("key_points", []))
+        points_html = f'<div class="key-points"><strong>关键点</strong><ul>{points}</ul></div>' if points else ""
         refs = ", ".join(str(item) for item in chapter.get("referenced_shots", []))
         refs_html = f'<p class="shot-refs">引用镜头: {html.escape(refs)}</p>' if include_refs and refs else ""
         body_html = _render_markdown(str(chapter.get("body_markdown") or ""))
         sections.append(
             f"""
-<section class="chapter-section" id="{html.escape(chapter['chapter_id'])}">
-  <h2>{html.escape(chapter_title)}</h2>
+<section class="chapter-section" id="{html.escape(chapter_id)}" aria-labelledby="{html.escape(chapter_id)}-title">
   <div class="chapter-layout">
     <div class="chapter-copy">
+      <div class="chapter-kicker">CHAPTER {index:02d}</div>
+      <header class="chapter-header">
+        <h2 id="{html.escape(chapter_id)}-title">{html.escape(chapter_title)}</h2>
+      </header>
       <div class="chapter-body">{body_html}</div>
-      <div class="key-points"><strong>关键点</strong><ul>{points}</ul></div>
+      {points_html}
       {refs_html}
     </div>
     {gallery_html}
@@ -500,21 +725,38 @@ def _render_html(
 </section>
 """.strip()
         )
+    summary_html = f'<p class="summary">{html.escape(report_description)}</p>' if report_description else ""
+    refs_status = "开启" if include_refs else "关闭"
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{html.escape(outline.get("title", "视频博客笔记"))}</title>
+  <title>{html.escape(report_title)}</title>
   <link rel="stylesheet" href="assets/style.css" />
 </head>
 <body>
-  <article>
-    <h1>{html.escape(outline.get("title", "视频博客笔记"))}</h1>
-    <p class="summary">{html.escape(outline.get("description", ""))}</p>
-    <nav><ol>{nav_items}</ol></nav>
-    {"".join(sections)}
-  </article>
+  <main class="report-shell">
+    <article class="report-page">
+      <header class="report-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">视频图文报告</p>
+          <h1>{html.escape(report_title)}</h1>
+          {summary_html}
+        </div>
+        <dl class="report-stats" aria-label="报告概览">
+          <div><dt>章节</dt><dd>{len(chapters)}</dd></div>
+          <div><dt>关键帧</dt><dd>{image_count}</dd></div>
+          <div><dt>引用</dt><dd>{refs_status}</dd></div>
+        </dl>
+      </header>
+      <nav class="toc" aria-label="章节目录">
+        <div class="toc-header"><strong>目录</strong><span>{len(chapters)} 章</span></div>
+        <ol>{nav_items}</ol>
+      </nav>
+      <div class="chapters">{"".join(sections)}</div>
+    </article>
+  </main>
 </body>
 </html>
 """
