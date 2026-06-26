@@ -189,10 +189,11 @@ def effective_model_config(config: dict[str, Any], model_role: str | None = None
     return _merge_env_config(config, model_role=role)
 
 
-PROMPT_SIGNATURE_VERSION = "2026-06-26-chapter-subsection-agent"
+PROMPT_SIGNATURE_VERSION = "2026-06-26-outline-planner-agent"
 PROMPT_SIGNATURE_FILES = (
     "shot_analysis_prompt.txt",
     "global_outline_prompt.txt",
+    "outline_planner_prompt.txt",
     "chapter_subsection_prompt.txt",
     "chapter_writer_prompt.txt",
     "outline_prompt.txt",
@@ -499,6 +500,67 @@ def _parse_chapter_subsection_tags(text: str, valid_shot_ids: list[str], *, max_
     if _has_keep_tag(text):
         return {"mode": "keep", "subsections": [], "warnings": warnings}
     raise ValueError("chapter_subsections tagged response missing valid KEEP or SUB tags")
+
+
+def _next_tag_body_after(text: str, offset: int, tag: str, stop_tag: str | None = None) -> str:
+    stop_index = len(text)
+    if stop_tag:
+        stop_match = re.search(rf"<\s*{re.escape(stop_tag)}(?:\s+[^>]*)?>", text[offset:], flags=re.IGNORECASE)
+        if stop_match:
+            stop_index = offset + stop_match.start()
+    snippet = text[offset:stop_index]
+    return _tag_text(snippet, tag)
+
+
+def _parse_outline_planner_tags(text: str, valid_shot_ids: list[str], *, max_chapters: int = 8) -> dict[str, Any]:
+    warnings: list[str] = []
+    chapters: list[dict[str, Any]] = []
+    invalid_refs: list[str] = []
+    seen_titles: set[str] = set()
+    max_count = max(1, max_chapters)
+    chapter_pattern = re.compile(
+        r"<\s*CHAPTER(?P<attrs>[^>]*)>(?P<body>.*?)<\s*/\s*CHAPTER\s*>",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    for match in chapter_pattern.finditer(text):
+        raw_attrs = match.group("attrs") or ""
+        attrs: dict[str, str] = {}
+        for attr in re.finditer(r"([A-Za-z_][\w:-]*)\s*=\s*([\"'])(.*?)\2", raw_attrs, flags=re.DOTALL):
+            attrs[attr.group(1).lower()] = attr.group(3).strip()
+
+        title = _compact_text(_clean_outline_title(match.group("body")), 28)
+        if not title:
+            continue
+        if title in seen_titles:
+            warnings.append(f"duplicate_outline_chapter_removed:{title}")
+            continue
+        shot_refs = attrs.get("shots") or attrs.get("shot_ids") or ""
+        shot_ids, invalid = _expand_shot_refs(shot_refs, valid_shot_ids)
+        invalid_refs.extend(invalid)
+        if not shot_ids:
+            warnings.append(f"empty_outline_chapter_removed:{title}")
+            continue
+        summary = _compact_text(_next_tag_body_after(text, match.end(), "SUMMARY", stop_tag="CHAPTER"), 80)
+        seen_titles.add(title)
+        chapters.append({"title": title, "summary": summary or title, "shot_ids": shot_ids})
+        if len(chapters) >= max_count:
+            break
+
+    if invalid_refs:
+        warnings.append(f"invalid_outline_shots_removed:{','.join(_dedupe_texts(invalid_refs))}")
+    total_chapter_tags = len(list(chapter_pattern.finditer(text)))
+    if len(chapters) >= max_count and total_chapter_tags > max_count:
+        warnings.append(f"too_many_outline_chapters_truncated:{total_chapter_tags}")
+    if not chapters:
+        raise ValueError("outline_planner tagged response missing valid CHAPTER tags")
+
+    return {
+        "title": _compact_text(_clean_outline_title(_tag_text(text, "TITLE")), 32),
+        "description": _compact_text(_tag_text(text, "DESCRIPTION"), 160),
+        "chapters": chapters,
+        "warnings": warnings,
+    }
 
 
 def _extract_ocr_texts(raw_text: str) -> list[str]:
@@ -1147,6 +1209,126 @@ class LocalModelAdapter:
             return _parse_global_outline_tags(raw, valid_chunk_ids)
 
         return self._with_retries("global_outline", run, payload)
+
+    def _outline_planner_payload(
+        self,
+        global_summary: dict[str, Any],
+        chunk_summaries: list[dict[str, Any]],
+        shot_briefs: list[dict[str, Any]],
+        *,
+        max_chapters: int,
+    ) -> dict[str, Any]:
+        chunks: list[dict[str, Any]] = []
+        for summary in chunk_summaries:
+            raw_topics = summary.get("main_topics") or []
+            if isinstance(raw_topics, str):
+                raw_topics = [raw_topics]
+            chunks.append(
+                {
+                    "chunk_id": str(summary.get("chunk_id") or ""),
+                    "shot_range": summary.get("shot_range") or "",
+                    "main_topics": [str(topic) for topic in list(raw_topics) if str(topic).strip()][:5],
+                    "summary": _compact_text(str(summary.get("summary") or ""), 260),
+                }
+            )
+        return {
+            "global_summary": {
+                "video_main_theme": str(global_summary.get("video_main_theme") or ""),
+                "main_sections": list(global_summary.get("main_sections") or []),
+                "section_sources": list(global_summary.get("section_sources") or []),
+                "important_shots": list(global_summary.get("important_shots") or []),
+            },
+            "chunk_summaries": chunks,
+            "shot_briefs": shot_briefs,
+            "max_chapters": max_chapters,
+        }
+
+    def _local_plan_outline(
+        self,
+        global_summary: dict[str, Any],
+        chunk_summaries: list[dict[str, Any]],
+        shot_briefs: list[dict[str, Any]],
+        *,
+        max_chapters: int,
+    ) -> dict[str, Any]:
+        shot_ids = [str(shot.get("shot_id")) for shot in shot_briefs if shot.get("shot_id")]
+        if not shot_ids:
+            raise ValueError("outline_planner requires at least one shot brief")
+
+        chapters: list[dict[str, Any]] = []
+        seen_ranges: set[tuple[str, str]] = set()
+        for summary in chunk_summaries[:max(1, max_chapters)]:
+            chunk_id = str(summary.get("chunk_id") or "").strip()
+            raw_topics = summary.get("main_topics") or []
+            if isinstance(raw_topics, str):
+                raw_topics = [raw_topics]
+            title_source = next((str(topic).strip() for topic in raw_topics if str(topic).strip()), "")
+            title = _compact_text(_clean_outline_title(title_source or str(summary.get("summary") or "")), 28)
+            range_value = summary.get("shot_range")
+            range_ids: list[str] = []
+            if isinstance(range_value, (list, tuple)):
+                range_ids = [str(item) for item in range_value if str(item) in shot_ids]
+            elif isinstance(range_value, str):
+                range_ids, _ = _expand_shot_refs(range_value, shot_ids)
+            if not range_ids and chunk_id:
+                range_ids = [shot_id for shot_id in shot_ids if shot_id.startswith(chunk_id)]
+            if not range_ids:
+                continue
+            key = (range_ids[0], range_ids[-1])
+            if key in seen_ranges:
+                continue
+            seen_ranges.add(key)
+            chapters.append(
+                {
+                    "title": title or f"Part {len(chapters) + 1}",
+                    "summary": _compact_text(str(summary.get("summary") or title), 80),
+                    "shot_ids": range_ids,
+                }
+            )
+
+        if not chapters:
+            count = min(max(1, max_chapters), max(1, (len(shot_ids) + 7) // 8))
+            per_group = max(1, (len(shot_ids) + count - 1) // count)
+            sections = [str(section) for section in list(global_summary.get("main_sections") or []) if str(section).strip()]
+            for index in range(count):
+                group = shot_ids[index * per_group : (index + 1) * per_group]
+                if not group:
+                    continue
+                title = sections[index] if index < len(sections) else f"Part {index + 1}"
+                chapters.append({"title": title, "summary": title, "shot_ids": group})
+
+        return {
+            "title": str(global_summary.get("video_main_theme") or ""),
+            "description": "",
+            "chapters": chapters[:max(1, max_chapters)],
+            "warnings": ["local_outline_planner"],
+        }
+
+    def plan_outline(
+        self,
+        global_summary: dict[str, Any],
+        chunk_summaries: list[dict[str, Any]],
+        shot_briefs: list[dict[str, Any]],
+        *,
+        max_chapters: int,
+    ) -> dict[str, Any]:
+        payload = self._outline_planner_payload(global_summary, chunk_summaries, shot_briefs, max_chapters=max_chapters)
+        valid_shot_ids = [str(shot.get("shot_id")) for shot in shot_briefs if shot.get("shot_id")]
+
+        def run() -> dict[str, Any]:
+            if self.provider == "local_heuristic":
+                return self._local_plan_outline(global_summary, chunk_summaries, shot_briefs, max_chapters=max_chapters)
+            prompt = _read_prompt(
+                "outline_planner_prompt.txt",
+                (
+                    "You are an Outline Planner Agent. Plan first-level report chapters from the full video outline context. "
+                    "Only output TITLE, DESCRIPTION, CHAPTER and SUMMARY tags. Do not output JSON or Markdown."
+                ),
+            )
+            raw = self._chat_text("outline_planner", prompt, payload)
+            return _parse_outline_planner_tags(raw, valid_shot_ids, max_chapters=max_chapters)
+
+        return self._with_retries("outline_planner", run, payload)
 
     def _chapter_subsection_payload(
         self,

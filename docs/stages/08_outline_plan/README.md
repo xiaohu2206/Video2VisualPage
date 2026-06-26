@@ -4,6 +4,8 @@
 
 根据镜头卡片、分块摘要和全局摘要生成网页报告目录，并把镜头分配到章节。目录是后续章节写作和静态渲染的结构来源。
 
+目录规划的一级章节必须优先按语义边界生成，而不是按镜头数量均分。完整改造方案见 [Outline Planning Refactor 设计文档](../../designs/outline-planning-refactor/README.md)。
+
 ## 输入
 
 ```txt
@@ -17,6 +19,8 @@ outputs/{project_id}/init/config.json
 
 ```txt
 outputs/{project_id}/outline_plan/outline.json
+outputs/{project_id}/outline_plan/chapter_boundary_decisions.jsonl
+outputs/{project_id}/outline_plan/outline_structure_qa.json
 outputs/{project_id}/outline_plan/subsection_decisions.jsonl
 ```
 
@@ -54,6 +58,9 @@ outputs/{project_id}/outline_plan/subsection_decisions.jsonl
 ## 规划约束
 
 - 章节顺序默认按视频时间线排列。
+- 一级章节应对应页面级目录主题，不能只是平均切出来的大镜头容器。
+- 优先使用 `global_summary.section_sources` 和 `chunk_summaries.shot_range` 推导章节边界。
+- 当 `section_sources` 缺失、歧义或无法解析时，才回退到模型规划或本地兜底策略。
 - 每个章节必须引用真实存在的 `shot_id`。
 - 每章必须有 `representative_shot_id`，且它必须属于本章 `shot_ids`。
 - 一个镜头默认只属于一个主章节。
@@ -85,13 +92,19 @@ outputs/{project_id}/outline_plan/subsection_decisions.jsonl
 }
 ```
 
+如果本地可以根据 `section_sources` 稳定生成章节边界，则不需要调用一级目录模型。只有在 chunk 与 section 的对应关系不足以确定章节边界时，才调用 Outline Planner Agent。
+
 ## 实现任务
 
 - 读取成功的镜头分析记录。
+- 读取 `chunk_summaries.jsonl`，解析每个 chunk 的镜头或时间范围。
 - 生成轻量 `shot_briefs`。
-- 调用目录规划模型生成 outline。
+- 优先根据 `global_summary.section_sources` 生成一级章节边界。
+- 对 `section_sources` 缺失或歧义的项目，调用 Outline Planner Agent 生成一级章节草案。
 - 校验并修正章节引用。
 - 为每章补齐 `start_sec` 和 `end_sec`。
+- 写入章节边界决策调试信息。
+- 对一级章节结构做风险检测，识别“章节过大”“小节像一级章”“相邻章节主题重复”等问题。
 - 对信息密度较高的大章节判断是否需要二级小节。
 - 需要小节时调用 Chapter Subsection Agent，并用标签结构解析输出。
 - 写入 `subsection_decisions.jsonl` 记录每章决策。
@@ -101,6 +114,8 @@ outputs/{project_id}/outline_plan/subsection_decisions.jsonl
 ## 二级小节策略
 
 `08_outline_plan` 先用本地规则判断一级章节是否需要继续拆分。只有满足镜头多、主题多、topic shift 明显、重点镜头分布分散等条件时，才调用模型生成二级小节。
+
+二级小节不是用来修复明显错误的一级章节。如果一个小节已经可以独立成为页面目录中的一章，应该回到一级目录规划阶段重新切分章节。
 
 模型不输出 JSON，只输出标签：
 
@@ -135,10 +150,12 @@ python -m video2visualpage plan-outline `
 
 | 场景 | 处理 |
 | --- | --- |
-| 模型输出非 JSON | 尝试 JSON repair |
+| `section_sources` 缺失或无法解析 | 调用 Outline Planner Agent；失败后使用本地兜底 |
+| Outline Planner Agent 输出无法解析 | 保留本地兜底章节并写 warning |
 | 引用不存在的 `shot_id` | 移除引用并写 warning |
 | 章节没有镜头 | 删除该章节或合并到相邻章节 |
 | 没有代表镜头 | 选择本章最高 `importance_score` 镜头 |
+| 章节覆盖过大且 topic shift 很多 | 写入结构风险；必要时触发结构 QA |
 | 所有章节都无效 | 阶段失败 |
 
 ## 验收标准
@@ -148,13 +165,16 @@ python -m video2visualpage plan-outline `
 - 每个章节都有 `chapter_id`、`title`、`summary`、`shot_ids`、`representative_shot_id`。
 - 所有 `shot_ids` 都来自 `shot_analysis.jsonl`。
 - `representative_shot_id` 属于当前章节。
+- 一级章节边界优先匹配 `section_sources` 指向的 chunk 范围。
+- 二级小节标题不应与其他一级章节标题高度重复。
 - `run_state.json` 中 `08_outline_plan` 为 `done`。
 
 ## 测试建议
 
-- 用 mock model 测目录生成。
+- 用 `section_sources` mock 数据测试 chunk 到章节边界的映射。
+- 用 mock model 测 Outline Planner Agent 标签输出解析。
 - 单测不存在 shot 引用的清理逻辑。
 - 单测空章节删除或合并。
 - 单测代表镜头自动补齐。
 - 单测章节时间范围计算。
-
+- 单测结构风险检测：章节过大、小节与一级章节重复、相邻章节主题重复。
