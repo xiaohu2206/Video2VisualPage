@@ -62,6 +62,8 @@ outputs/{project_id}/chapter_write/chapters_index.json
 - 正文使用中文解释型表达。
 - `referenced_shots` 必须和章节引用镜头保持可追溯关系。
 - 代表图必须来自 `recommended_display_frame` 或输入 frames。
+- 如果当前章节包含 `subsections`，正文应按小节顺序组织，并使用 Markdown `## 小节标题`。
+- 如果当前章节没有 `subsections`，不要强行添加空洞小节。
 
 ## 实现任务
 

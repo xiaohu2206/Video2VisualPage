@@ -89,6 +89,10 @@ Commands print progress to `stderr` and keep the final JSON result on `stdout`. 
 $env:VIDEO2VISUALPAGE_PROGRESS = "0"
 ```
 
+## Model I/O Monitoring
+
+Every model call through `LocalModelAdapter` writes structured monitoring logs under `outputs/{project_id}/logs/llm_monitor/`. The monitor groups records by model function, keeps a global `index.jsonl`, writes per-call details, and maintains `health.json` for success rate, failures, retry/latency, and provider-call stability. See `docs/llm-monitoring.md` for the schema.
+
 ## Commands
 
 Commands that operate on an existing project default to `outputs\demo`, so you can omit `--project` for the common local workflow.

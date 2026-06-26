@@ -21,6 +21,8 @@ outputs/{project_id}/shot_understanding/shot_analysis.jsonl
 
 ```txt
 outputs/{project_id}/logs/llm_calls.jsonl
+outputs/{project_id}/logs/llm_monitor/index.jsonl
+outputs/{project_id}/logs/llm_monitor/by_function/shot_understanding/calls.jsonl
 outputs/{project_id}/logs/errors.jsonl
 ```
 

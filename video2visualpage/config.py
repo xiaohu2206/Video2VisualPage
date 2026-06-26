@@ -37,6 +37,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_shots_per_chunk": 40,
         "chapter_count": "auto",
     },
+    "llm_monitoring": {
+        "enabled": True,
+        "capture_payloads": True,
+        "capture_raw_response": True,
+        "max_text_chars": 50000,
+    },
+    "chapter_subsections": {
+        "enabled": True,
+        "min_shots_for_model": 8,
+        "min_need_score": 5,
+        "max_subsections_per_chapter": 5,
+        "min_shots_per_subsection": 2,
+        "min_coverage_ratio": 0.6,
+    },
     "vision_model": {
         "provider": None,
         "base_url": None,

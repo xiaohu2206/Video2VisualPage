@@ -38,6 +38,7 @@ python -m video2visualpage resume $PROJECT --to-stage qa
 - 除 `init` 外，常规步骤命令默认会自动补齐缺失的上游 JSON 产物。
 - 如果只想严格执行当前步骤，不自动补依赖，可对步骤别名命令或 `stage` 命令追加 `--no-deps`。
 - 每个步骤目录都会写入 `step_manifest.json`，用于记录步骤名、状态、输出文件和运行摘要。
+- 调用大模型的步骤会额外写入结构化监控日志：`outputs/{project_id}/logs/llm_monitor/index.jsonl`、`outputs/{project_id}/logs/llm_monitor/health.json`，并按功能分类写入 `logs/llm_monitor/by_function/{function}/`。
 - 每个步骤的业务实现入口位于 `video2visualpage/stages/`；命令路由在 `video2visualpage/cli.py`，流水线调度在 `video2visualpage/pipeline.py`。
 
 ## 00. init
@@ -177,11 +178,20 @@ python -m video2visualpage shot-understanding --project $PROJECT
 ```txt
 1. outputs/{project_id}/shot_understanding/shot_analysis.jsonl
 2. outputs/{project_id}/shot_understanding/step_manifest.json
+3. outputs/{project_id}/logs/llm_monitor/by_function/shot_understanding/calls.jsonl
 ```
 
 ## 07. summary_reduce
 
 对镜头卡片做分块摘要，并生成全局摘要。
+
+处理逻辑：
+
+- 先按 `max_shots_per_chunk` 生成 `chunk_summaries.jsonl`。
+- 再把轻量 chunk 摘要交给 Global Outline Agent。
+- Global Outline Agent 使用标签结构输出 `THEME`、`STYLE` 和 `SECTION`，不直接输出 JSON。
+- 本地解析标签、校验 chunk 引用，并组装 `global_summary.json`。
+- 如果 Global Outline Agent 失败，回退到基于 `main_topics` 的规则聚合。
 
 代码文件：`video2visualpage/stages/summary_reduce.py`
 
@@ -195,11 +205,35 @@ python -m video2visualpage summary-reduce --project $PROJECT
 1. outputs/{project_id}/summary_reduce/chunk_summaries.jsonl
 2. outputs/{project_id}/summary_reduce/global_summary.json
 3. outputs/{project_id}/summary_reduce/step_manifest.json
+4. outputs/{project_id}/logs/llm_monitor/by_function/summary_reduce/calls.jsonl
+5. outputs/{project_id}/logs/llm_monitor/by_function/global_outline/calls.jsonl
+```
+
+`global_summary.json` 主要字段：
+
+```txt
+video_main_theme
+main_sections
+suggested_chapter_count
+narrative_style
+important_shots
+source_chunks
+section_sources
+warnings
 ```
 
 ## 08. outline_plan
 
 生成网页报告目录、章节和镜头分配。
+
+处理逻辑：
+
+- 先生成一级章节，并把镜头按章节分配。
+- 对每个一级章节做本地评分，判断是否需要继续拆成二级小节。
+- 只有镜头多、主题多、topic shift 明显或重点镜头分布分散的大章节才调用 Chapter Subsection Agent。
+- Chapter Subsection Agent 使用 `<KEEP/>` / `<SUB>` 标签结构输出，不直接输出 JSON。
+- 本地解析标签、校验小节镜头引用，并补齐 `subsection_id`、`representative_shot_id`、`start_sec`、`end_sec`。
+- 如果章节已经足够细，或模型输出不可用，则不写 `subsections`，保持旧的整章写作逻辑。
 
 代码文件：`video2visualpage/stages/outline_plan.py`
 
@@ -211,12 +245,22 @@ python -m video2visualpage outline-plan --project $PROJECT
 
 ```txt
 1. outputs/{project_id}/outline_plan/outline.json
-2. outputs/{project_id}/outline_plan/step_manifest.json
+2. outputs/{project_id}/outline_plan/subsection_decisions.jsonl
+3. outputs/{project_id}/outline_plan/step_manifest.json
+4. outputs/{project_id}/logs/llm_monitor/by_function/chapter_subsections/calls.jsonl
 ```
+
+`outline.json` 章节对象可选字段：
+
+```txt
+subsections
+```
+
+`subsections` 为空或不存在时表示该章节不需要继续细分。
 
 ## 09. chapter_write
 
-按章节生成正文 JSON。
+按章节生成正文 JSON。有 `subsections` 的章节会按小节顺序组织 Markdown 二级标题；没有 `subsections` 的章节继续按整章写作。
 
 代码文件：`video2visualpage/stages/chapter_write.py`
 
@@ -232,6 +276,7 @@ python -m video2visualpage chapter-write --project $PROJECT
 3. outputs/{project_id}/chapter_write/chapter_002.json
 4. outputs/{project_id}/chapter_write/chapter_*.json
 5. outputs/{project_id}/chapter_write/step_manifest.json
+6. outputs/{project_id}/logs/llm_monitor/by_function/chapter_write/calls.jsonl
 ```
 
 单独重写某一章：

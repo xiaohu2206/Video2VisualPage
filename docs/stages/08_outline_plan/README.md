@@ -17,6 +17,7 @@ outputs/{project_id}/init/config.json
 
 ```txt
 outputs/{project_id}/outline_plan/outline.json
+outputs/{project_id}/outline_plan/subsection_decisions.jsonl
 ```
 
 ## outline.json 契约
@@ -33,7 +34,17 @@ outputs/{project_id}/outline_plan/outline.json
       "shot_ids": ["shot_000001", "shot_000002", "shot_000003"],
       "representative_shot_id": "shot_000001",
       "start_sec": 0.0,
-      "end_sec": 12.8
+      "end_sec": 12.8,
+      "subsections": [
+        {
+          "subsection_id": "chapter_001_sub_001",
+          "title": "求助情境建立",
+          "shot_ids": ["shot_000001", "shot_000002"],
+          "representative_shot_id": "shot_000001",
+          "start_sec": 0.0,
+          "end_sec": 8.4
+        }
+      ]
     }
   ],
   "warnings": []
@@ -49,6 +60,9 @@ outputs/{project_id}/outline_plan/outline.json
 - 章节标题不能凭空创造视频中没有的信息。
 - 章节数量建议 3 到 8 个，短视频可以少于 3 个。
 - 高 `importance_score` 镜头应优先被分配到章节。
+- `subsections` 是可选字段；只有大章节确实需要细分时才生成。
+- 小节必须只引用当前章节内的 `shot_id`。
+- 小节代表镜头必须属于当前小节。
 
 ## 输入给模型的材料
 
@@ -78,8 +92,30 @@ outputs/{project_id}/outline_plan/outline.json
 - 调用目录规划模型生成 outline。
 - 校验并修正章节引用。
 - 为每章补齐 `start_sec` 和 `end_sec`。
+- 对信息密度较高的大章节判断是否需要二级小节。
+- 需要小节时调用 Chapter Subsection Agent，并用标签结构解析输出。
+- 写入 `subsection_decisions.jsonl` 记录每章决策。
 - 如果模型漏掉重要镜头，追加到最近章节或写 warning。
 - 更新 `run_state.json`。
+
+## 二级小节策略
+
+`08_outline_plan` 先用本地规则判断一级章节是否需要继续拆分。只有满足镜头多、主题多、topic shift 明显、重点镜头分布分散等条件时，才调用模型生成二级小节。
+
+模型不输出 JSON，只输出标签：
+
+```txt
+<KEEP/>
+```
+
+或：
+
+```txt
+<SUB shots="shot_001-shot_006">上下文丢失的表现</SUB>
+<SUB shots="shot_007-shot_012">源码中的上下文入口</SUB>
+```
+
+最终 `subsections` 由本地解析、校验和补齐生成。
 
 ## CLI
 

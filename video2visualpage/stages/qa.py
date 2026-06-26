@@ -38,6 +38,15 @@ def _check_outline_refs(project_path: Path) -> list[dict[str, Any]]:
         representative = str(chapter.get("representative_shot_id"))
         if representative not in shot_ids:
             missing.append(representative)
+        chapter_shots = {str(shot_id) for shot_id in chapter.get("shot_ids", [])}
+        for subsection in chapter.get("subsections", []) or []:
+            subsection_shots = {str(shot_id) for shot_id in subsection.get("shot_ids", [])}
+            for shot_id in subsection_shots:
+                if shot_id not in shot_ids or shot_id not in chapter_shots:
+                    missing.append(shot_id)
+            subsection_representative = str(subsection.get("representative_shot_id"))
+            if subsection_representative not in subsection_shots:
+                missing.append(subsection_representative)
     return [
         {
             "name": "outline_shot_refs",

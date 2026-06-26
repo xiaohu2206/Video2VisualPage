@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..env import env_flag, env_value
+from ..monitoring import LLMMonitor
 from ..paths import repo_root, resolve_artifact_path
 from ..progress import ProgressReporter
 from ..state import now_iso
@@ -188,9 +189,11 @@ def effective_model_config(config: dict[str, Any], model_role: str | None = None
     return _merge_env_config(config, model_role=role)
 
 
-PROMPT_SIGNATURE_VERSION = "2026-06-24-ocr-subtitle-note-output"
+PROMPT_SIGNATURE_VERSION = "2026-06-26-chapter-subsection-agent"
 PROMPT_SIGNATURE_FILES = (
     "shot_analysis_prompt.txt",
+    "global_outline_prompt.txt",
+    "chapter_subsection_prompt.txt",
     "chapter_writer_prompt.txt",
     "outline_prompt.txt",
 )
@@ -288,6 +291,18 @@ def _extract_tag(text: str, tag: str) -> str | None:
     return match.group(1).strip()
 
 
+def _extract_tag_blocks(text: str, tag: str) -> list[tuple[dict[str, str], str]]:
+    pattern = rf"<\s*{re.escape(tag)}(?P<attrs>[^>]*)>(?P<body>.*?)<\s*/\s*{re.escape(tag)}\s*>"
+    blocks: list[tuple[dict[str, str], str]] = []
+    for match in re.finditer(pattern, text, flags=re.DOTALL | re.IGNORECASE):
+        attrs: dict[str, str] = {}
+        raw_attrs = match.group("attrs") or ""
+        for attr in re.finditer(r"([A-Za-z_][\w:-]*)\s*=\s*([\"'])(.*?)\2", raw_attrs, flags=re.DOTALL):
+            attrs[attr.group(1).lower()] = attr.group(3).strip()
+        blocks.append((attrs, match.group("body").strip()))
+    return blocks
+
+
 def _tag_text(text: str, tag: str, default: str = "") -> str:
     value = _extract_tag(text, tag)
     if value is None:
@@ -359,6 +374,131 @@ def _dedupe_texts(items: list[str]) -> list[str]:
         seen.add(text)
         deduped.append(text)
     return deduped
+
+
+def _clean_outline_title(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    text = re.sub(r"^\s*(?:[-*+]|\d+[.)、:]|第\s*\d+\s*(?:部分|章|节)[：:、]?|[一二三四五六七八九十]+[、.：:])\s*", "", text)
+    return text.strip().strip("`#*- ")
+
+
+def _split_chunk_ids(value: str) -> list[str]:
+    return _dedupe_texts([item for item in re.split(r"[,，、;\s]+", value) if item.strip()])
+
+
+def _parse_global_outline_tags(text: str, valid_chunk_ids: list[str]) -> dict[str, Any]:
+    valid_chunks = set(valid_chunk_ids)
+    warnings: list[str] = []
+    theme = _clean_outline_title(_tag_text(text, "THEME"))
+    if not theme:
+        raise ValueError("global_outline tagged response missing required THEME tag")
+
+    style = _tag_text(text, "STYLE", "structured_report").strip() or "structured_report"
+    sections: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    invalid_chunk_refs: list[str] = []
+
+    for attrs, body in _extract_tag_blocks(text, "SECTION"):
+        title = _clean_outline_title(body)
+        if not title:
+            continue
+        if title in seen_titles:
+            warnings.append(f"duplicate_section_removed:{title}")
+            continue
+        raw_chunks = attrs.get("chunks") or attrs.get("source_chunks") or ""
+        source_chunks: list[str] = []
+        for chunk_id in _split_chunk_ids(raw_chunks):
+            if chunk_id in valid_chunks:
+                source_chunks.append(chunk_id)
+            else:
+                invalid_chunk_refs.append(chunk_id)
+        seen_titles.add(title)
+        sections.append({"title": title, "source_chunks": _dedupe_texts(source_chunks)})
+
+    if invalid_chunk_refs:
+        warnings.append(f"invalid_section_chunks_removed:{','.join(_dedupe_texts(invalid_chunk_refs))}")
+    if not sections:
+        raise ValueError("global_outline tagged response missing valid SECTION tags")
+    if len(sections) > 6:
+        warnings.append(f"too_many_sections_truncated:{len(sections)}")
+        sections = sections[:6]
+
+    return {
+        "video_main_theme": theme,
+        "narrative_style": style,
+        "sections": sections,
+        "warnings": warnings,
+    }
+
+
+def _has_keep_tag(text: str) -> bool:
+    return bool(re.search(r"<\s*KEEP\s*/\s*>", text, flags=re.IGNORECASE))
+
+
+def _split_shot_refs(value: str) -> list[str]:
+    refs: list[str] = []
+    for token in re.split(r"[,，、;；\s]+", value):
+        cleaned = token.strip().strip("\"'`")
+        if cleaned:
+            refs.append(cleaned)
+    return refs
+
+
+def _expand_shot_refs(raw_refs: str, valid_shot_ids: list[str]) -> tuple[list[str], list[str]]:
+    shot_index = {shot_id: index for index, shot_id in enumerate(valid_shot_ids)}
+    expanded: list[str] = []
+    invalid: list[str] = []
+    for token in _split_shot_refs(raw_refs):
+        if token in shot_index:
+            expanded.append(token)
+            continue
+        if "-" in token:
+            start, end = [part.strip() for part in token.split("-", 1)]
+            if start in shot_index and end in shot_index:
+                start_index = shot_index[start]
+                end_index = shot_index[end]
+                low = min(start_index, end_index)
+                high = max(start_index, end_index)
+                expanded.extend(valid_shot_ids[low : high + 1])
+                continue
+        invalid.append(token)
+    return _dedupe_texts(expanded), _dedupe_texts(invalid)
+
+
+def _parse_chapter_subsection_tags(text: str, valid_shot_ids: list[str], *, max_subsections: int = 5) -> dict[str, Any]:
+    warnings: list[str] = []
+    subsections: list[dict[str, Any]] = []
+    invalid_refs: list[str] = []
+    seen_titles: set[str] = set()
+    max_count = max(1, max_subsections)
+
+    for attrs, body in _extract_tag_blocks(text, "SUB"):
+        title = _compact_text(_clean_outline_title(body), 24)
+        if not title:
+            continue
+        if title in seen_titles:
+            warnings.append(f"duplicate_subsection_removed:{title}")
+            continue
+        shot_refs = attrs.get("shots") or attrs.get("shot_ids") or ""
+        shot_ids, invalid = _expand_shot_refs(shot_refs, valid_shot_ids)
+        invalid_refs.extend(invalid)
+        if not shot_ids:
+            warnings.append(f"empty_subsection_removed:{title}")
+            continue
+        seen_titles.add(title)
+        subsections.append({"title": title, "shot_ids": shot_ids})
+        if len(subsections) >= max_count:
+            break
+
+    if invalid_refs:
+        warnings.append(f"invalid_subsection_shots_removed:{','.join(_dedupe_texts(invalid_refs))}")
+    if len(subsections) >= max_count and len(_extract_tag_blocks(text, "SUB")) > max_count:
+        warnings.append(f"too_many_subsections_truncated:{len(_extract_tag_blocks(text, 'SUB'))}")
+    if subsections:
+        return {"mode": "split", "subsections": subsections, "warnings": warnings}
+    if _has_keep_tag(text):
+        return {"mode": "keep", "subsections": [], "warnings": warnings}
+    raise ValueError("chapter_subsections tagged response missing valid KEEP or SUB tags")
 
 
 def _extract_ocr_texts(raw_text: str) -> list[str]:
@@ -455,6 +595,9 @@ class LocalModelAdapter:
         progress: ProgressReporter | None = None,
     ):
         self.project_dir = Path(project_dir)
+        monitoring_config = config.get("llm_monitoring", {}) if isinstance(config, dict) else {}
+        self.monitor = LLMMonitor(self.project_dir, monitoring_config)
+        self._active_llm_function_call: dict[str, Any] | None = None
         self.model_role = _normalize_model_role(model_role) or "llm"
         role_for_config = None if self.model_role == "llm" else self.model_role
         self.config = effective_model_config(config, role_for_config)
@@ -510,6 +653,17 @@ class LocalModelAdapter:
         for attempt in range(1, self.max_retries + 2):
             self._rate_limit()
             started = time.perf_counter()
+            call = self.monitor.begin_function_call(
+                stage=stage,
+                model_role=self.model_role,
+                provider=self.provider,
+                model=self.model or None,
+                payload=payload,
+                attempt=attempt,
+                max_retries=self.max_retries,
+            )
+            previous_call = self._active_llm_function_call
+            self._active_llm_function_call = call
             try:
                 if self.progress:
                     self.progress.model_attempt(
@@ -523,6 +677,7 @@ class LocalModelAdapter:
                 elapsed = time.perf_counter() - started
                 if self.progress:
                     self.progress.model_success(stage, attempt, elapsed, self._result_progress_summary(result))
+                self.monitor.finish_function_call(call, elapsed_sec=elapsed, result=result)
                 self._log_call(stage, payload, result, attempt=attempt, elapsed=elapsed)
                 return result
             except Exception as exc:  # noqa: BLE001 - adapter boundary logs all failures.
@@ -530,9 +685,12 @@ class LocalModelAdapter:
                 last_error = exc
                 if self.progress:
                     self.progress.model_failure(stage, attempt, elapsed, exc)
+                self.monitor.finish_function_call(call, elapsed_sec=elapsed, result={"error": str(exc)}, error=exc)
                 self._log_call(stage, payload, {"error": str(exc)}, attempt=attempt, elapsed=elapsed)
                 if attempt <= self.max_retries:
                     time.sleep(self.retry_delay_sec)
+            finally:
+                self._active_llm_function_call = previous_call
         raise RuntimeError(f"{stage} failed after retries: {last_error}") from last_error
 
     def _with_role_progress(self, detail: str) -> str:
@@ -555,6 +713,12 @@ class LocalModelAdapter:
             shot_ids = [str(card.get("shot_id")) for card in cards if card.get("shot_id")]
             shot_range = f"{shot_ids[0]}-{shot_ids[-1]}" if shot_ids else "empty"
             return f"chunk_id={payload.get('chunk_id')}; shots={len(cards)}; range={shot_range}"
+        if stage == "global_outline":
+            chunks = list(payload.get("chunks") or [])
+            chunk_ids = [str(chunk.get("chunk_id")) for chunk in chunks if isinstance(chunk, dict) and chunk.get("chunk_id")]
+            preview = ",".join(chunk_ids[:4])
+            suffix = "..." if len(chunk_ids) > 4 else ""
+            return f"chunks={len(chunks)}; ids={preview}{suffix}"
         if stage == "chapter_write":
             chapter = payload.get("chapter") or {}
             cards = list(payload.get("cards") or [])
@@ -653,8 +817,9 @@ class LocalModelAdapter:
             body["response_format"] = {"type": "json_object"}
 
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        request_url = self._chat_completions_url()
         request = urllib.request.Request(
-            self._chat_completions_url(),
+            request_url,
             data=data,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -662,26 +827,65 @@ class LocalModelAdapter:
             },
             method="POST",
         )
+
+        raw_started = time.perf_counter()
+        response_payload: Any | None = None
+        raw_content: Any | None = None
+
+        def record_provider_call(*, error: BaseException | str | None = None) -> None:
+            self.monitor.record_provider_call(
+                stage=stage,
+                model_role=self.model_role,
+                provider=self.provider,
+                model=self.model or None,
+                base_url=self.base_url,
+                request_url=request_url,
+                request_body=body,
+                payload=payload,
+                system_prompt=system_prompt,
+                response_instruction=response_instruction,
+                images=images,
+                attached_image_count=len(image_parts),
+                json_response=json_response,
+                elapsed_sec=time.perf_counter() - raw_started,
+                parent_call=self._active_llm_function_call,
+                response_payload=response_payload,
+                raw_content=raw_content if isinstance(raw_content, str) else None,
+                error=error,
+            )
+
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
                 response_payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LLM API request failed with HTTP {exc.code}: {body_text[:500]}") from exc
+            response_payload = {"http_status": exc.code, "body": body_text}
+            raw_content = body_text
+            error_message = f"LLM API request failed with HTTP {exc.code}: {body_text[:500]}"
+            record_provider_call(error=error_message)
+            raise RuntimeError(error_message) from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM API request failed: {exc}") from exc
+            error_message = f"LLM API request failed: {exc}"
+            record_provider_call(error=error_message)
+            raise RuntimeError(error_message) from exc
 
-        choices = response_payload.get("choices") if isinstance(response_payload, dict) else None
-        if not choices:
-            raise RuntimeError("LLM API response does not contain choices")
-        message = choices[0].get("message") or {}
-        raw_content = message.get("content")
-        if isinstance(raw_content, list):
-            raw_content = "".join(str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in raw_content)
-        if isinstance(raw_content, dict):
-            raw_content = json.dumps(raw_content, ensure_ascii=False)
-        if not isinstance(raw_content, str) or not raw_content.strip():
-            raise RuntimeError("LLM API response content is empty")
+        try:
+            choices = response_payload.get("choices") if isinstance(response_payload, dict) else None
+            if not choices:
+                raise RuntimeError("LLM API response does not contain choices")
+            message = choices[0].get("message") or {}
+            raw_content = message.get("content")
+            if isinstance(raw_content, list):
+                raw_content = "".join(str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in raw_content)
+            if isinstance(raw_content, dict):
+                raw_content = json.dumps(raw_content, ensure_ascii=False)
+            if not isinstance(raw_content, str) or not raw_content.strip():
+                raise RuntimeError("LLM API response content is empty")
+        except RuntimeError as exc:
+            record_provider_call(error=exc)
+            raise
+
+        record_provider_call()
         return raw_content
 
     def _chat_json(self, stage: str, system_prompt: str, payload: dict[str, Any], images: list[str] | None = None) -> dict[str, Any]:
@@ -878,15 +1082,201 @@ class LocalModelAdapter:
 
         return self._with_retries("summary_reduce", run, payload)
 
+    def _global_outline_payload(self, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+        chunks: list[dict[str, Any]] = []
+        for summary in summaries:
+            raw_topics = summary.get("main_topics") or []
+            if isinstance(raw_topics, str):
+                raw_topics = [raw_topics]
+            topics = [str(topic) for topic in list(raw_topics) if str(topic).strip()]
+            chunks.append(
+                {
+                    "chunk_id": str(summary.get("chunk_id") or ""),
+                    "shot_range": summary.get("shot_range") or "",
+                    "main_topics": topics[:5],
+                    "summary": _compact_text(str(summary.get("summary") or ""), 240),
+                }
+            )
+        return {"chunks": chunks}
+
+    def _local_summarize_global_outline(self, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+        topics: list[str] = []
+        sections: list[dict[str, Any]] = []
+        seen_titles: set[str] = set()
+        for summary in summaries:
+            chunk_id = str(summary.get("chunk_id") or "").strip()
+            raw_topics = summary.get("main_topics") or []
+            if isinstance(raw_topics, str):
+                raw_topics = [raw_topics]
+            chunk_topics = [str(topic).strip() for topic in list(raw_topics) if str(topic).strip()]
+            topics.extend(chunk_topics)
+            title = _clean_outline_title(chunk_topics[0] if chunk_topics else str(summary.get("summary") or ""))
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+            sections.append({"title": _compact_text(title, 28), "source_chunks": [chunk_id] if chunk_id else []})
+            if len(sections) >= 6:
+                break
+        unique_topics = _dedupe_texts(topics)
+        if not sections:
+            sections = [{"title": "内容概览", "source_chunks": []}]
+        return {
+            "video_main_theme": _compact_text(unique_topics[0], 24) if unique_topics else "视频博客笔记",
+            "narrative_style": "structured_report",
+            "sections": sections,
+            "warnings": [],
+        }
+
+    def summarize_global_outline(self, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+        payload = self._global_outline_payload(summaries)
+        valid_chunk_ids = [str(chunk.get("chunk_id")) for chunk in payload["chunks"] if chunk.get("chunk_id")]
+
+        def run() -> dict[str, Any]:
+            if self.provider == "local_heuristic":
+                return self._local_summarize_global_outline(summaries)
+            prompt = _read_prompt(
+                "global_outline_prompt.txt",
+                (
+                    "你是 Global Outline Agent。根据按时间顺序排列的 chunk 摘要生成视频级大纲。"
+                    "合并重复主题，按视频时间顺序组织 SECTION。不要输出 JSON。"
+                    "只输出 <THEME>、<STYLE>、<SECTION chunks=\"chunk_001\"> 标签。"
+                    "THEME 不超过 24 个中文字符，SECTION 标题不超过 28 个中文字符，SECTION 最多 6 个。"
+                ),
+            )
+            raw = self._chat_text("global_outline", prompt, payload)
+            return _parse_global_outline_tags(raw, valid_chunk_ids)
+
+        return self._with_retries("global_outline", run, payload)
+
+    def _chapter_subsection_payload(
+        self,
+        chapter: dict[str, Any],
+        cards: list[dict[str, Any]],
+        *,
+        target_subsections: int,
+        max_subsections: int,
+    ) -> dict[str, Any]:
+        shots: list[dict[str, Any]] = []
+        for card in cards:
+            raw_tags = card.get("topic_tags") or []
+            if isinstance(raw_tags, str):
+                raw_tags = [raw_tags]
+            raw_entities = card.get("key_entities") or []
+            if isinstance(raw_entities, str):
+                raw_entities = [raw_entities]
+            shots.append(
+                {
+                    "shot_id": str(card.get("shot_id") or ""),
+                    "start_sec": card.get("start_sec"),
+                    "end_sec": card.get("end_sec"),
+                    "importance_score": card.get("importance_score"),
+                    "topic_tags": [str(tag) for tag in list(raw_tags) if str(tag).strip()][:5],
+                    "key_entities": [str(entity) for entity in list(raw_entities) if str(entity).strip()][:5],
+                    "text": _compact_text(str(card.get("merged_summary") or ""), 90),
+                }
+            )
+        return {
+            "chapter": {
+                "chapter_id": str(chapter.get("chapter_id") or ""),
+                "title": str(chapter.get("title") or ""),
+                "summary": _compact_text(str(chapter.get("summary") or ""), 180),
+                "shot_count": len(shots),
+                "target_subsections": target_subsections,
+                "max_subsections": max_subsections,
+            },
+            "shots": shots,
+        }
+
+    def _local_plan_chapter_subsections(
+        self,
+        chapter: dict[str, Any],
+        cards: list[dict[str, Any]],
+        *,
+        target_subsections: int,
+        max_subsections: int,
+    ) -> dict[str, Any]:
+        count = min(max_subsections, max(2, target_subsections), max(1, len(cards) // 2))
+        if len(cards) < 2 or count < 2:
+            return {"mode": "keep", "subsections": [], "warnings": ["local_subsection_keep"]}
+        per_group = max(1, (len(cards) + count - 1) // count)
+        subsections: list[dict[str, Any]] = []
+        for index in range(count):
+            group = cards[index * per_group : (index + 1) * per_group]
+            if not group:
+                continue
+            tokens: list[str] = []
+            for card in group:
+                raw_tags = card.get("topic_tags") or []
+                if isinstance(raw_tags, str):
+                    raw_tags = [raw_tags]
+                tokens.extend(str(tag) for tag in list(raw_tags) if str(tag).strip())
+            if tokens:
+                title = _compact_text(_clean_outline_title(_dedupe_texts(tokens)[0]), 24)
+            else:
+                summary = " ".join(str(card.get("merged_summary") or "") for card in group)
+                title = _compact_text((_keywords(summary, limit=1) or [f"小节 {index + 1}"])[0], 24)
+            subsections.append({"title": title or f"小节 {index + 1}", "shot_ids": [str(card.get("shot_id")) for card in group]})
+        if len(subsections) < 2:
+            return {"mode": "keep", "subsections": [], "warnings": ["local_subsection_single_group"]}
+        return {"mode": "split", "subsections": subsections, "warnings": []}
+
+    def plan_chapter_subsections(
+        self,
+        chapter: dict[str, Any],
+        cards: list[dict[str, Any]],
+        *,
+        target_subsections: int,
+        max_subsections: int,
+    ) -> dict[str, Any]:
+        payload = self._chapter_subsection_payload(
+            chapter,
+            cards,
+            target_subsections=target_subsections,
+            max_subsections=max_subsections,
+        )
+        valid_shot_ids = [str(card.get("shot_id")) for card in cards if card.get("shot_id")]
+
+        def run() -> dict[str, Any]:
+            if self.provider == "local_heuristic":
+                return self._local_plan_chapter_subsections(
+                    chapter,
+                    cards,
+                    target_subsections=target_subsections,
+                    max_subsections=max_subsections,
+                )
+            prompt = _read_prompt(
+                "chapter_subsection_prompt.txt",
+                (
+                    "你是 Chapter Subsection Agent。判断当前一级章节是否需要二级小节。"
+                    "如果已经足够细，只输出 <KEEP/>。如果需要拆分，只输出 "
+                    "<SUB shots=\"shot_001-shot_006\">小节标题</SUB> 标签。不要输出 JSON、Markdown 或解释。"
+                ),
+            )
+            raw = self._chat_text("chapter_subsections", prompt, payload)
+            return _parse_chapter_subsection_tags(raw, valid_shot_ids, max_subsections=max_subsections)
+
+        return self._with_retries("chapter_subsections", run, payload)
+
     def _local_write_chapter(self, chapter: dict[str, Any], cards: list[dict[str, Any]], global_summary: dict[str, Any]) -> dict[str, Any]:
         summaries = [str(card.get("merged_summary") or "").strip() for card in cards if card.get("merged_summary")]
         key_points = [_compact_text(text, 80) for text in summaries[:5]]
         representative = next((card.get("recommended_display_frame") for card in cards if card.get("recommended_display_frame")), None)
-        body_source = " ".join(summaries)
-        if body_source:
-            body = _compact_text(body_source, 900)
+        cards_by_id = {str(card.get("shot_id")): card for card in cards}
+        subsections = list(chapter.get("subsections") or [])
+        if subsections:
+            parts: list[str] = []
+            for subsection in subsections:
+                subsection_cards = [cards_by_id[shot_id] for shot_id in subsection.get("shot_ids", []) if shot_id in cards_by_id]
+                subsection_summaries = [str(card.get("merged_summary") or "").strip() for card in subsection_cards if card.get("merged_summary")]
+                section_body = _compact_text(" ".join(subsection_summaries), 360) if subsection_summaries else "本小节没有提取到足够的文字内容。"
+                parts.append(f"## {subsection.get('title')}\n\n{section_body}")
+            body = "\n\n".join(parts)
         else:
-            body = "本章节没有提取到足够的画面文字或字幕内容。"
+            body_source = " ".join(summaries)
+            if body_source:
+                body = _compact_text(body_source, 900)
+            else:
+                body = "本章节没有提取到足够的画面文字或字幕内容。"
         return {
             "chapter_id": chapter["chapter_id"],
             "title": chapter["title"],

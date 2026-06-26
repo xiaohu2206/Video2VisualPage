@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Dict, Union
 
 from .constants import STAGE_DEPENDENCIES, STAGE_IDS, STAGE_IDS_BY_STEP_NAME
 from .models.adapter import model_signature
@@ -25,7 +25,7 @@ from .state import get_stage_record, load_run_state, set_stage_status, write_ste
 from .storage import read_json
 from .utils.eventlog import log_error, log_event
 
-StageRunner = Callable[[str | Path], dict[str, Any]]
+StageRunner = Callable[[Union[str, Path]], Dict[str, Any]]
 
 STAGE_RUNNERS: dict[str, StageRunner] = {
     "00_init": run_init_check,
@@ -42,10 +42,11 @@ STAGE_RUNNERS: dict[str, StageRunner] = {
     "11_qa": run_qa,
 }
 
-MODEL_SIGNATURE_STAGES = {"06_shot_understanding", "07_summary_reduce", "09_chapter_write"}
+MODEL_SIGNATURE_STAGES = {"06_shot_understanding", "07_summary_reduce", "08_outline_plan", "09_chapter_write"}
 MODEL_ROLE_BY_STAGE = {
     "06_shot_understanding": "vision",
     "07_summary_reduce": "copywriting",
+    "08_outline_plan": "copywriting",
     "09_chapter_write": "copywriting",
 }
 
