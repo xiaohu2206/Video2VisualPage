@@ -17,6 +17,12 @@ from ..paths import repo_root, resolve_artifact_path
 from ..progress import ProgressReporter
 from ..state import now_iso
 from ..storage import append_jsonl
+from .ocr import (
+    PaddleOCRFrameRecognizer,
+    _candidate_text_crop_boxes,
+    extract_ocr_texts,
+    paddleocr_model_name,
+)
 
 
 def _compact_text(value: str, limit: int = 120) -> str:
@@ -103,11 +109,24 @@ ENV_VALUE_SUFFIXES = {
     "TEMPERATURE": "temperature",
     "TIMEOUT": "timeout_sec",
     "MAX_IMAGES_PER_SHOT": "max_images_per_shot",
+    "DEVICE": "device",
+    "OCR_DEVICE": "ocr_device",
+    "OCR_ROOT": "ocr_root",
+    "OCR_DET_MODEL_DIR": "ocr_det_model_dir",
+    "OCR_REC_MODEL_DIR": "ocr_rec_model_dir",
+    "OCR_MIN_SCORE": "ocr_min_score",
+    "OCR_CROP_MIN_SCORE": "ocr_crop_min_score",
+    "OCR_ENGINE": "ocr_engine",
+    "OCR_PRECISION": "ocr_precision",
+    "OCR_CONCURRENCY": "ocr_concurrency",
 }
 
 ENV_FLAG_SUFFIXES = {
     "JSON_MODE": "json_mode",
     "VISION_ENABLED": "vision_enabled",
+    "OCR_USE_TENSORRT": "ocr_use_tensorrt",
+    "OCR_ALLOW_CPU_FALLBACK": "ocr_allow_cpu_fallback",
+    "OCR_CROP_FALLBACK": "ocr_crop_fallback",
 }
 
 
@@ -189,13 +208,14 @@ def effective_model_config(config: dict[str, Any], model_role: str | None = None
     return _merge_env_config(config, model_role=role)
 
 
-PROMPT_SIGNATURE_VERSION = "2026-06-26-outline-planner-agent"
+PROMPT_SIGNATURE_VERSION = "2026-06-27-plain-input-prompts"
 PROMPT_SIGNATURE_FILES = (
     "shot_analysis_prompt.txt",
     "global_outline_prompt.txt",
     "outline_planner_prompt.txt",
     "chapter_subsection_prompt.txt",
     "chapter_writer_prompt.txt",
+    "chapter_subsection_writer_prompt.txt",
     "outline_prompt.txt",
 )
 
@@ -225,6 +245,14 @@ def model_signature(config: dict[str, Any], model_role: str | None = None) -> di
         "vision_enabled": bool(merged.get("vision_enabled", True)),
         "max_images_per_shot": _int_value(merged.get("max_images_per_shot"), 1),
         "temperature": _float_value(merged.get("temperature"), 0.2),
+        "device": str(merged.get("ocr_device") or merged.get("device") or "").strip(),
+        "ocr_root": str(merged.get("ocr_root") or "").strip(),
+        "ocr_det_model_dir": str(merged.get("ocr_det_model_dir") or "").strip(),
+        "ocr_rec_model_dir": str(merged.get("ocr_rec_model_dir") or "").strip(),
+        "ocr_min_score": _float_value(merged.get("ocr_min_score"), 0.0),
+        "ocr_crop_min_score": _float_value(merged.get("ocr_crop_min_score"), 0.6),
+        "ocr_allow_cpu_fallback": _bool_value(merged.get("ocr_allow_cpu_fallback"), True),
+        "ocr_crop_fallback": _bool_value(merged.get("ocr_crop_fallback"), True),
         "prompt_bundle": _prompt_bundle_signature(),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -375,6 +403,274 @@ def _dedupe_texts(items: list[str]) -> list[str]:
         seen.add(text)
         deduped.append(text)
     return deduped
+
+
+def _plain_scalar(value: Any, *, limit: int | None = None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        parts = []
+        for key, item in value.items():
+            text = _plain_scalar(item, limit=80)
+            if text:
+                parts.append(f"{key}={text}")
+        text = "; ".join(parts)
+    elif isinstance(value, (list, tuple, set)):
+        parts = [_plain_scalar(item, limit=80) for item in value]
+        text = ", ".join(part for part in parts if part)
+    else:
+        text = re.sub(r"\s+", " ", str(value)).strip()
+    if limit is not None and text:
+        return _compact_text(text, limit)
+    return text
+
+
+def _plain_items(value: Any, *, item_limit: int = 80, max_items: int = 8) -> list[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, (list, tuple, set)) else [value]
+    items: list[str] = []
+    for item in raw_items:
+        text = _plain_scalar(item, limit=item_limit)
+        if text:
+            items.append(text)
+        if len(items) >= max_items:
+            break
+    return items
+
+
+def _plain_join(value: Any, *, empty: str = "none", item_limit: int = 80, max_items: int = 8) -> str:
+    items = _plain_items(value, item_limit=item_limit, max_items=max_items)
+    return ", ".join(items) if items else empty
+
+
+def _time_value(payload: dict[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    if value is None and isinstance(payload.get("time_range"), dict):
+        value = payload["time_range"].get(key)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _time_range_text(payload: dict[str, Any]) -> str:
+    start = _time_value(payload, "start_sec")
+    end = _time_value(payload, "end_sec")
+    if start is None and end is None:
+        return ""
+    if start is None:
+        return f"until {end:.2f}s"
+    if end is None:
+        return f"from {start:.2f}s"
+    return f"{start:.2f}s-{end:.2f}s"
+
+
+def _shot_context_line(card: dict[str, Any], *, include_frames: bool = False, text_limit: int = 150) -> str:
+    shot_id = _plain_scalar(card.get("shot_id"), limit=60) or "unknown_shot"
+    pieces = [shot_id]
+    time_range = _time_range_text(card)
+    if time_range:
+        pieces.append(f"time {time_range}")
+    if card.get("importance_score") is not None:
+        pieces.append(f"score {_plain_scalar(card.get('importance_score'), limit=24)}")
+
+    text = (
+        card.get("merged_summary")
+        or card.get("text")
+        or card.get("subtitle_summary")
+        or card.get("visual_summary")
+        or card.get("subtitle_text")
+    )
+    text_value = _plain_scalar(text, limit=text_limit)
+    if text_value:
+        pieces.append(f"text: {text_value}")
+
+    topics = _plain_join(card.get("topic_tags"), empty="", item_limit=48, max_items=5)
+    if topics:
+        pieces.append(f"topics: {topics}")
+    entities = _plain_join(card.get("key_entities"), empty="", item_limit=48, max_items=5)
+    if entities:
+        pieces.append(f"entities: {entities}")
+    frame = _plain_scalar(card.get("recommended_display_frame"), limit=140)
+    if frame:
+        pieces.append(f"frame: {frame}")
+    if include_frames:
+        frames = _plain_join(card.get("frames"), empty="", item_limit=140, max_items=4)
+        if frames:
+            pieces.append(f"frames: {frames}")
+    return "- " + "; ".join(pieces)
+
+
+def _chunk_line(chunk: dict[str, Any]) -> str:
+    chunk_id = _plain_scalar(chunk.get("chunk_id"), limit=60) or "unknown_chunk"
+    shot_range = _plain_join(chunk.get("shot_range"), empty="", item_limit=60, max_items=4)
+    topics = _plain_join(chunk.get("main_topics"), empty="", item_limit=60, max_items=5)
+    summary = _plain_scalar(chunk.get("summary"), limit=260)
+    pieces = [chunk_id]
+    if shot_range:
+        pieces.append(f"shots {shot_range}")
+    if topics:
+        pieces.append(f"topics: {topics}")
+    if summary:
+        pieces.append(f"summary: {summary}")
+    return "- " + "; ".join(pieces)
+
+
+def _subsection_line(subsection: dict[str, Any]) -> str:
+    subsection_id = _plain_scalar(subsection.get("subsection_id") or subsection.get("id"), limit=80)
+    title = _plain_scalar(subsection.get("title"), limit=120)
+    shot_ids = _plain_join(subsection.get("shot_ids"), empty="none", item_limit=60, max_items=80)
+    representative = _plain_scalar(subsection.get("representative_shot_id"), limit=80)
+    pieces = []
+    if subsection_id:
+        pieces.append(f"id {subsection_id}")
+    if title:
+        pieces.append(f"title {title}")
+    pieces.append(f"shots {shot_ids}")
+    if representative:
+        pieces.append(f"representative {representative}")
+    return "- " + "; ".join(pieces)
+
+
+def _chapter_context_lines(chapter: dict[str, Any]) -> list[str]:
+    lines = [
+        f"Chapter id: {_plain_scalar(chapter.get('chapter_id'), limit=80)}",
+        f"Chapter title: {_plain_scalar(chapter.get('title'), limit=120)}",
+    ]
+    summary = _plain_scalar(chapter.get("summary"), limit=240)
+    if summary:
+        lines.append(f"Chapter summary: {summary}")
+    shot_ids = _plain_join(chapter.get("shot_ids"), empty="", item_limit=60, max_items=80)
+    if shot_ids:
+        lines.append(f"Chapter shot order: {shot_ids}")
+    subsections = list(chapter.get("subsections") or [])
+    if subsections:
+        lines.append("Planned subsections:")
+        for subsection in subsections:
+            if isinstance(subsection, dict):
+                lines.append(_subsection_line(subsection))
+    return [line for line in lines if not line.endswith(": ")]
+
+
+def _global_summary_lines(global_summary: dict[str, Any]) -> list[str]:
+    lines = []
+    theme = _plain_scalar(global_summary.get("video_main_theme"), limit=120)
+    if theme:
+        lines.append(f"Global theme: {theme}")
+    sections = _plain_join(global_summary.get("main_sections"), empty="", item_limit=80, max_items=12)
+    if sections:
+        lines.append(f"Main sections: {sections}")
+    important = _plain_join(global_summary.get("important_shots"), empty="", item_limit=60, max_items=20)
+    if important:
+        lines.append(f"Important shots: {important}")
+    section_sources = list(global_summary.get("section_sources") or [])
+    if section_sources:
+        lines.append("Section sources:")
+        for source in section_sources[:12]:
+            if not isinstance(source, dict):
+                continue
+            title = _plain_scalar(source.get("title"), limit=80)
+            chunks = _plain_join(source.get("source_chunks"), empty="none", item_limit=60, max_items=12)
+            lines.append(f"- {title}: {chunks}")
+    return lines
+
+
+def _generic_plain_input(payload: dict[str, Any]) -> str:
+    lines = ["Input context:"]
+    for key, value in payload.items():
+        if isinstance(value, list):
+            lines.append(f"{key}:")
+            for item in value[:30]:
+                lines.append("- " + _plain_scalar(item, limit=240))
+        elif isinstance(value, dict):
+            lines.append(f"{key}: {_plain_scalar(value, limit=320)}")
+        else:
+            lines.append(f"{key}: {_plain_scalar(value, limit=320)}")
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _plain_input_context(stage: str, payload: dict[str, Any]) -> str:
+    if stage == "shot_understanding":
+        lines = ["Input context:"]
+        lines.append(f"Shot id: {_plain_scalar(payload.get('shot_id'), limit=80)}")
+        time_range = _time_range_text(payload)
+        if time_range:
+            lines.append(f"Time range: {time_range}")
+        subtitle = _plain_scalar(payload.get("subtitle_text"), limit=360)
+        if subtitle:
+            lines.append(f"Subtitle: {subtitle}")
+        frames = _plain_join(payload.get("frames"), empty="", item_limit=160, max_items=8)
+        if frames:
+            lines.append(f"Attached frame paths: {frames}")
+        warnings = _plain_join(payload.get("warnings"), empty="", item_limit=120, max_items=8)
+        if warnings:
+            lines.append(f"Existing warnings: {warnings}")
+        return "\n".join(lines)
+
+    if stage == "summary_reduce":
+        cards = list(payload.get("cards") or [])
+        shot_ids = [
+            _plain_scalar(card.get("shot_id"), limit=60)
+            for card in cards
+            if isinstance(card, dict) and card.get("shot_id")
+        ]
+        lines = ["Input context:", f"Chunk id: {_plain_scalar(payload.get('chunk_id'), limit=80)}"]
+        if shot_ids:
+            lines.append(f"Shot range: {shot_ids[0]} to {shot_ids[-1]}")
+        lines.append("Shots:")
+        lines.extend(_shot_context_line(card, text_limit=180) for card in cards if isinstance(card, dict))
+        return "\n".join(lines)
+
+    if stage == "global_outline":
+        lines = ["Input context:", "Chunk summaries:"]
+        lines.extend(_chunk_line(chunk) for chunk in list(payload.get("chunks") or []) if isinstance(chunk, dict))
+        return "\n".join(lines)
+
+    if stage == "outline_planner":
+        lines = ["Input context:"]
+        global_summary = payload.get("global_summary") if isinstance(payload.get("global_summary"), dict) else {}
+        lines.extend(_global_summary_lines(global_summary))
+        lines.append(f"Maximum chapters: {_plain_scalar(payload.get('max_chapters'), limit=24)}")
+        lines.append("Chunk summaries:")
+        lines.extend(_chunk_line(chunk) for chunk in list(payload.get("chunk_summaries") or []) if isinstance(chunk, dict))
+        lines.append("Shot briefs:")
+        lines.extend(_shot_context_line(shot, text_limit=120) for shot in list(payload.get("shot_briefs") or []) if isinstance(shot, dict))
+        return "\n".join(lines)
+
+    if stage == "chapter_subsections":
+        lines = ["Input context:"]
+        chapter = payload.get("chapter") if isinstance(payload.get("chapter"), dict) else {}
+        lines.extend(_chapter_context_lines(chapter))
+        lines.append(f"Target subsections: {_plain_scalar(chapter.get('target_subsections'), limit=24)}")
+        lines.append(f"Maximum subsections: {_plain_scalar(chapter.get('max_subsections'), limit=24)}")
+        lines.append("Chapter shots:")
+        lines.extend(_shot_context_line(shot, text_limit=130) for shot in list(payload.get("shots") or []) if isinstance(shot, dict))
+        return "\n".join(lines)
+
+    if stage == "chapter_write":
+        lines = ["Input context:"]
+        global_summary = payload.get("global_summary") if isinstance(payload.get("global_summary"), dict) else {}
+        lines.extend(_global_summary_lines(global_summary))
+        chapter = payload.get("chapter") if isinstance(payload.get("chapter"), dict) else {}
+        lines.extend(_chapter_context_lines(chapter))
+        subsections = list(payload.get("subsections") or [])
+        if subsections:
+            lines.append("Subsections to write:")
+            lines.extend(_subsection_line(subsection) for subsection in subsections if isinstance(subsection, dict))
+        lines.append("Available shots:")
+        lines.extend(
+            _shot_context_line(card, include_frames=True, text_limit=220)
+            for card in list(payload.get("cards") or [])
+            if isinstance(card, dict)
+        )
+        return "\n".join(lines)
+
+    return _generic_plain_input(payload)
+
+
+def _build_user_message(stage: str, payload: dict[str, Any], response_instruction: str) -> str:
+    return f"{_plain_input_context(stage, payload).strip()}\n\n{response_instruction}".strip()
 
 
 def _clean_outline_title(value: str) -> str:
@@ -563,31 +859,17 @@ def _parse_outline_planner_tags(text: str, valid_shot_ids: list[str], *, max_cha
     }
 
 
-def _extract_ocr_texts(raw_text: str) -> list[str]:
-    try:
-        value = _parse_json_value(raw_text)
-    except Exception:
-        lines = [line.strip("- \t\r") for line in raw_text.splitlines()]
-        return _dedupe_texts([line for line in lines if line and not line.startswith("```")])
-
-    texts: list[str] = []
-
-    def visit(node: Any) -> None:
-        if isinstance(node, dict):
-            text = node.get("text")
-            if isinstance(text, str) and text.strip():
-                texts.append(text)
-            for key in ("words_info", "ocr_result", "kv_result", "data", "items", "result"):
-                if key in node:
-                    visit(node[key])
-        elif isinstance(node, list):
-            for item in node:
-                visit(item)
-
-    visit(value)
-    if not texts and isinstance(value, str):
-        texts.append(value)
-    return _dedupe_texts(texts)
+def _bool_value(value: Any, default: bool = False) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _parse_tagged_shot_analysis(text: str, package: dict[str, Any]) -> dict[str, Any]:
@@ -636,6 +918,210 @@ def _parse_tagged_shot_analysis(text: str, package: dict[str, Any]) -> dict[str,
     }
 
 
+def _chapter_frame_candidates(cards: list[dict[str, Any]], referenced_shots: list[str]) -> list[str]:
+    by_id = {str(card.get("shot_id")): card for card in cards if card.get("shot_id")}
+    referenced_set = set(referenced_shots)
+    ordered_cards = [by_id[shot_id] for shot_id in referenced_shots if shot_id in by_id]
+    ordered_cards.extend(card for card in cards if str(card.get("shot_id")) not in referenced_set)
+
+    frames: list[str] = []
+    for card in ordered_cards:
+        recommended = str(card.get("recommended_display_frame") or "").strip()
+        if recommended:
+            frames.append(recommended)
+        for frame in list(card.get("frames") or []):
+            frame_text = str(frame or "").strip()
+            if frame_text:
+                frames.append(frame_text)
+    return _dedupe_texts(frames)
+
+
+def _parse_chapter_write_tags(text: str, chapter: dict[str, Any], cards: list[dict[str, Any]], global_summary: dict[str, Any]) -> dict[str, Any]:
+    try:
+        legacy = _parse_json_object(text)
+    except Exception:
+        legacy = {}
+    if legacy and _extract_tag(text, "BODY_MARKDOWN") is None:
+        legacy.setdefault("chapter_id", chapter.get("chapter_id"))
+        legacy.setdefault("title", chapter.get("title"))
+        legacy.setdefault("representative_frame", None)
+        legacy.setdefault("key_points", [])
+        legacy.setdefault("referenced_shots", list(chapter.get("shot_ids") or []))
+        legacy.setdefault("model_output_format", "legacy_json_chapter")
+        legacy.setdefault("global_theme", global_summary.get("video_main_theme"))
+        return legacy
+
+    body_markdown = _tag_text(text, "BODY_MARKDOWN")
+    if not body_markdown:
+        raise ValueError("chapter_write tagged response missing required BODY_MARKDOWN tag")
+
+    warnings: list[str] = []
+    expected_chapter_id = str(chapter.get("chapter_id") or "").strip()
+    returned_chapter_id = _tag_text(text, "CHAPTER_ID").strip()
+    chapter_id = expected_chapter_id or returned_chapter_id
+    if returned_chapter_id and expected_chapter_id and returned_chapter_id != expected_chapter_id:
+        warnings.append(f"chapter_id_mismatch_ignored:{returned_chapter_id}")
+
+    valid_shot_ids = [str(card.get("shot_id")) for card in cards if card.get("shot_id")]
+    valid_shot_set = set(valid_shot_ids)
+    default_shot_ids = [
+        str(shot_id)
+        for shot_id in list(chapter.get("shot_ids") or [])
+        if str(shot_id) in valid_shot_set
+    ] or valid_shot_ids
+
+    raw_refs = _extract_tag(text, "REFERENCED_SHOTS")
+    if raw_refs is None:
+        referenced_shots = default_shot_ids
+        if referenced_shots:
+            warnings.append("referenced_shots_missing_fallback")
+    else:
+        cleaned_raw_refs = "\n".join(
+            re.sub(r"^\s*(?:[-*+]|\d+[.)]|[一二三四五六七八九十]+[、.])\s*", "", line).strip()
+            for line in raw_refs.splitlines()
+        )
+        referenced_shots, invalid_refs = _expand_shot_refs(cleaned_raw_refs, valid_shot_ids)
+        if invalid_refs:
+            warnings.append(f"invalid_referenced_shots_removed:{','.join(_dedupe_texts(invalid_refs))}")
+        if not referenced_shots and default_shot_ids:
+            referenced_shots = default_shot_ids
+            warnings.append("referenced_shots_empty_fallback")
+
+    frame_candidates = _chapter_frame_candidates(cards, referenced_shots)
+    representative_frame, frame_warning = _tag_frame(text, "REPRESENTATIVE_FRAME", frame_candidates)
+    if frame_warning:
+        warnings.append(frame_warning)
+
+    title = _tag_text(text, "TITLE", str(chapter.get("title") or "")).strip() or str(chapter.get("title") or chapter_id)
+    key_points = _tag_list(text, "KEY_POINTS")
+    if not key_points:
+        fallback_point = _compact_text(str(chapter.get("summary") or title or body_markdown), 80)
+        key_points = [fallback_point] if fallback_point else []
+        warnings.append("key_points_missing_fallback")
+
+    return {
+        "chapter_id": chapter_id,
+        "title": title,
+        "representative_frame": representative_frame,
+        "body_markdown": body_markdown,
+        "key_points": key_points,
+        "referenced_shots": referenced_shots,
+        "warnings": warnings,
+        "global_theme": global_summary.get("video_main_theme"),
+        "model_output_format": "tagged_chapter_v1",
+    }
+
+
+def _parse_chapter_subsection_write_tags(
+    text: str,
+    subsections: list[dict[str, Any]],
+    cards: list[dict[str, Any]],
+    global_summary: dict[str, Any],
+) -> dict[str, Any]:
+    expected: list[dict[str, Any]] = []
+    for index, subsection in enumerate(subsections, start=1):
+        subsection_id = str(subsection.get("subsection_id") or subsection.get("id") or f"subsection_{index:03d}").strip()
+        if subsection_id:
+            expected.append({**subsection, "subsection_id": subsection_id})
+    if not expected:
+        raise ValueError("chapter_write subsection batch has no expected subsections")
+
+    expected_by_id = {str(item["subsection_id"]): item for item in expected}
+    block_by_id: dict[str, str] = {}
+    warnings: list[str] = []
+    invalid_blocks: list[str] = []
+    duplicate_blocks: list[str] = []
+    for attrs, body in _extract_tag_blocks(text, "SUBSECTION"):
+        subsection_id = str(attrs.get("id") or attrs.get("subsection_id") or "").strip()
+        if not subsection_id:
+            invalid_blocks.append("<missing_id>")
+            continue
+        if subsection_id not in expected_by_id:
+            invalid_blocks.append(subsection_id)
+            continue
+        if subsection_id in block_by_id:
+            duplicate_blocks.append(subsection_id)
+            continue
+        block_by_id[subsection_id] = body
+
+    if invalid_blocks:
+        warnings.append(f"invalid_subsection_blocks_ignored:{','.join(_dedupe_texts(invalid_blocks))}")
+    if duplicate_blocks:
+        warnings.append(f"duplicate_subsection_blocks_ignored:{','.join(_dedupe_texts(duplicate_blocks))}")
+
+    missing = [str(item["subsection_id"]) for item in expected if str(item["subsection_id"]) not in block_by_id]
+    if missing:
+        raise ValueError(f"chapter_write subsection batch missing SUBSECTION blocks: {', '.join(missing)}")
+
+    cards_by_id = {str(card.get("shot_id")): card for card in cards if card.get("shot_id")}
+    outputs: list[dict[str, Any]] = []
+    for subsection in expected:
+        subsection_id = str(subsection["subsection_id"])
+        block = block_by_id[subsection_id]
+        body_markdown = _tag_text(block, "BODY_MARKDOWN") or _tag_text(block, "BODY")
+        if not body_markdown:
+            raise ValueError(f"chapter_write subsection {subsection_id} missing required BODY_MARKDOWN tag")
+
+        unit_warnings: list[str] = []
+        valid_shot_ids = [str(shot_id) for shot_id in list(subsection.get("shot_ids") or []) if str(shot_id) in cards_by_id]
+        default_shot_ids = valid_shot_ids
+        raw_refs = _extract_tag(block, "REFERENCED_SHOTS")
+        if raw_refs is None:
+            referenced_shots = default_shot_ids
+            if referenced_shots:
+                unit_warnings.append("referenced_shots_missing_fallback")
+        else:
+            cleaned_raw_refs = "\n".join(
+                re.sub(r"^\s*(?:[-*+]|\d+[.)]|[涓€浜屼笁鍥涗簲鍏竷鍏節鍗乚+[銆?])\s*", "", line).strip()
+                for line in raw_refs.splitlines()
+            )
+            referenced_shots, invalid_refs = _expand_shot_refs(cleaned_raw_refs, valid_shot_ids)
+            if invalid_refs:
+                unit_warnings.append(f"invalid_referenced_shots_removed:{','.join(_dedupe_texts(invalid_refs))}")
+            if not referenced_shots and default_shot_ids:
+                referenced_shots = default_shot_ids
+                unit_warnings.append("referenced_shots_empty_fallback")
+
+        unit_cards = [cards_by_id[shot_id] for shot_id in valid_shot_ids if shot_id in cards_by_id]
+        frame_candidates = _chapter_frame_candidates(unit_cards, referenced_shots)
+        representative_frame, frame_warning = _tag_frame(block, "REPRESENTATIVE_FRAME", frame_candidates)
+        if frame_warning:
+            unit_warnings.append(frame_warning)
+
+        key_points = _tag_list(block, "KEY_POINTS")
+        if not key_points:
+            fallback_point = _compact_text(str(subsection.get("title") or body_markdown), 80)
+            key_points = [fallback_point] if fallback_point else []
+            unit_warnings.append("key_points_missing_fallback")
+
+        for warning in _tag_list(block, "WARNINGS"):
+            if warning not in unit_warnings:
+                unit_warnings.append(warning)
+        for warning in unit_warnings:
+            warnings.append(f"{subsection_id}:{warning}")
+
+        outputs.append(
+            {
+                "subsection_id": subsection_id,
+                "title": str(subsection.get("title") or subsection_id),
+                "body_markdown": body_markdown,
+                "key_points": key_points,
+                "referenced_shots": referenced_shots,
+                "representative_frame": representative_frame,
+                "warnings": unit_warnings,
+                "global_theme": global_summary.get("video_main_theme"),
+                "model_output_format": "tagged_chapter_subsection_v1",
+            }
+        )
+
+    return {
+        "subsections": outputs,
+        "warnings": warnings,
+        "global_theme": global_summary.get("video_main_theme"),
+        "model_output_format": "tagged_chapter_subsection_batch_v1",
+    }
+
+
 def _require_keys(stage: str, payload: dict[str, Any], keys: list[str]) -> dict[str, Any]:
     missing = [key for key in keys if key not in payload]
     if missing:
@@ -647,6 +1133,7 @@ class LocalModelAdapter:
     """Model adapter with an explicit local heuristic mode and OpenAI-compatible API mode."""
 
     SUPPORTED_REMOTE_PROVIDERS = {"openai", "openai_compatible"}
+    SUPPORTED_LOCAL_PROVIDERS = {"local_heuristic", "paddleocr"}
 
     def __init__(
         self,
@@ -678,8 +1165,11 @@ class LocalModelAdapter:
         self.base_url = str(self.config.get("base_url") or "https://api.openai.com/v1").strip().rstrip("/")
         self.api_key = str(self.config.get("api_key") or "").strip()
         self._last_call = 0.0
+        self._paddleocr: PaddleOCRFrameRecognizer | None = None
+        if self.provider == "paddleocr" and not self.model:
+            self.model = paddleocr_model_name(self.config)
 
-        if self.provider == "local_heuristic":
+        if self.provider in self.SUPPORTED_LOCAL_PROVIDERS:
             return
         if self.provider not in self.SUPPORTED_REMOTE_PROVIDERS:
             raise NotImplementedError(f"LLM provider is not implemented: {self.provider}")
@@ -702,7 +1192,7 @@ class LocalModelAdapter:
         return f"{role_prefixes} or VIDEO2VISUALPAGE_LLM_{suffix} or OPENAI_{suffix}"
 
     def _rate_limit(self) -> None:
-        if self.provider == "local_heuristic":
+        if self.provider in self.SUPPORTED_LOCAL_PROVIDERS:
             return
         min_gap = 60.0 / float(self.rate_limit_per_minute)
         elapsed = time.monotonic() - self._last_call
@@ -784,7 +1274,16 @@ class LocalModelAdapter:
         if stage == "chapter_write":
             chapter = payload.get("chapter") or {}
             cards = list(payload.get("cards") or [])
+            subsections = list(payload.get("subsections") or [])
             title = _compact_text(str(chapter.get("title") or ""), 80)
+            if subsections:
+                subsection_ids = [str(item.get("subsection_id") or item.get("id")) for item in subsections if isinstance(item, dict)]
+                preview = ",".join(subsection_ids[:3])
+                suffix = "..." if len(subsection_ids) > 3 else ""
+                return (
+                    f"chapter_id={chapter.get('chapter_id')}; title={title}; "
+                    f"subsections={len(subsections)}; ids={preview}{suffix}; shots={len(cards)}"
+                )
             return f"chapter_id={chapter.get('chapter_id')}; title={title}; shots={len(cards)}"
         return f"input_keys={','.join(sorted(payload.keys()))}"
 
@@ -843,12 +1342,7 @@ class LocalModelAdapter:
         preserve_json_keys: bool,
     ) -> str:
         content: str | list[dict[str, Any]]
-        text = (
-            "输入 JSON:\n"
-            + json.dumps(payload, ensure_ascii=False, indent=2)
-            + "\n"
-            + response_instruction
-        )
+        text = _build_user_message(stage, payload, response_instruction)
         image_parts: list[dict[str, Any]] = []
         if self.vision_enabled and images:
             for frame in images[: self.max_images_per_shot]:
@@ -1010,7 +1504,19 @@ class LocalModelAdapter:
     def _is_ocr_model(self) -> bool:
         return "ocr" in self.model.lower()
 
+    def _paddleocr_frame_texts(self, frame: str) -> list[str]:
+        if self._paddleocr is None:
+            self._paddleocr = PaddleOCRFrameRecognizer(
+                self.project_dir,
+                self.config,
+                model=self.model,
+                crop_box_provider=_candidate_text_crop_boxes,
+            )
+        return self._paddleocr.frame_texts(frame)
+
     def _ocr_frame_texts(self, package: dict[str, Any], frame: str) -> list[str]:
+        if self.provider == "paddleocr":
+            return self._paddleocr_frame_texts(frame)
         raw = self._chat_raw(
             "shot_understanding",
             "你是 OCR 引擎。只提取图片中可读文字，不要解释，不要补充图片外信息。",
@@ -1024,7 +1530,7 @@ class LocalModelAdapter:
             json_response=False,
             preserve_json_keys=False,
         )
-        return _extract_ocr_texts(raw)
+        return extract_ocr_texts(raw)
 
     def _ocr_analyze_shot(self, package: dict[str, Any]) -> dict[str, Any]:
         shot_id = str(package.get("shot_id") or "")
@@ -1033,12 +1539,15 @@ class LocalModelAdapter:
         subtitle = str(package.get("subtitle_text") or "").strip()
         warnings = [str(item) for item in list(package.get("warnings") or []) if str(item).strip()]
         frame_texts: list[tuple[str, list[str]]] = []
+        warning_start = len(self._paddleocr.runtime_warnings) if self._paddleocr is not None else 0
         for frame in frames[: self.max_images_per_shot]:
             try:
                 frame_texts.append((frame, self._ocr_frame_texts(package, frame)))
             except Exception as exc:  # noqa: BLE001 - keep per-frame OCR failures visible in output.
                 warnings.append(f"ocr_failed:{Path(frame).name}:{exc}")
                 frame_texts.append((frame, []))
+        if self._paddleocr is not None:
+            warnings.extend(self._paddleocr.warnings_since(warning_start))
 
         on_screen_text = _dedupe_texts([text for _, texts in frame_texts for text in texts])
         subtitle_summary = _compact_text(subtitle, 240) if subtitle else "该镜头没有可用字幕。"
@@ -1083,7 +1592,7 @@ class LocalModelAdapter:
         def run() -> dict[str, Any]:
             if self.provider == "local_heuristic":
                 return self._local_analyze_shot(package)
-            if self._is_ocr_model():
+            if self.provider == "paddleocr" or self._is_ocr_model():
                 return self._ocr_analyze_shot(package)
             prompt = _read_prompt(
                 "shot_analysis_prompt.txt",
@@ -1469,6 +1978,48 @@ class LocalModelAdapter:
             "global_theme": global_summary.get("video_main_theme"),
         }
 
+    def _local_write_chapter_subsections(
+        self,
+        chapter: dict[str, Any],
+        subsections: list[dict[str, Any]],
+        cards: list[dict[str, Any]],
+        global_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        cards_by_id = {str(card.get("shot_id")): card for card in cards if card.get("shot_id")}
+        outputs: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for index, subsection in enumerate(subsections, start=1):
+            subsection_id = str(subsection.get("subsection_id") or subsection.get("id") or f"subsection_{index:03d}")
+            shot_ids = [str(shot_id) for shot_id in list(subsection.get("shot_ids") or []) if str(shot_id) in cards_by_id]
+            subsection_cards = [cards_by_id[shot_id] for shot_id in shot_ids]
+            summaries = [str(card.get("merged_summary") or "").strip() for card in subsection_cards if card.get("merged_summary")]
+            if summaries:
+                body = _compact_text(" ".join(summaries), 520)
+            else:
+                body = "本小节没有提取到足够的文字内容。"
+                warnings.append(f"{subsection_id}:local_subsection_empty")
+            key_points = [_compact_text(text, 80) for text in summaries[:3]]
+            representative = next((card.get("recommended_display_frame") for card in subsection_cards if card.get("recommended_display_frame")), None)
+            outputs.append(
+                {
+                    "subsection_id": subsection_id,
+                    "title": str(subsection.get("title") or subsection_id),
+                    "body_markdown": body,
+                    "key_points": key_points or [str(subsection.get("title") or chapter.get("title") or "小节内容")],
+                    "referenced_shots": shot_ids,
+                    "representative_frame": representative,
+                    "warnings": [],
+                    "global_theme": global_summary.get("video_main_theme"),
+                    "model_output_format": "local_chapter_subsection_v1",
+                }
+            )
+        return {
+            "subsections": outputs,
+            "warnings": warnings,
+            "global_theme": global_summary.get("video_main_theme"),
+            "model_output_format": "local_chapter_subsection_batch_v1",
+        }
+
     def write_chapter(self, chapter: dict[str, Any], cards: list[dict[str, Any]], global_summary: dict[str, Any]) -> dict[str, Any]:
         payload = {"chapter": chapter, "cards": cards, "global_summary": global_summary}
 
@@ -1477,13 +2028,43 @@ class LocalModelAdapter:
                 return self._local_write_chapter(chapter, cards, global_summary)
             prompt = _read_prompt(
                 "chapter_writer_prompt.txt",
-                "你是博客笔记章节写作 Agent。请为一个博客笔记章节返回严格 JSON，所有自然语言字段使用简体中文。",
+                (
+                    "你是博客笔记章节写作 Agent。请为一个博客笔记章节输出标签结构，"
+                    "只返回 CHAPTER_ID、TITLE、REPRESENTATIVE_FRAME、BODY_MARKDOWN、KEY_POINTS、REFERENCED_SHOTS 标签，"
+                    "不要输出 JSON。所有自然语言字段使用简体中文。"
+                ),
             )
-            result = self._chat_json("chapter_write", prompt, payload)
+            raw = self._chat_text("chapter_write", prompt, payload)
+            result = _parse_chapter_write_tags(raw, chapter, cards, global_summary)
             return _require_keys(
                 "chapter_write",
                 result,
                 ["chapter_id", "title", "representative_frame", "body_markdown", "key_points", "referenced_shots"],
             )
+
+        return self._with_retries("chapter_write", run, payload)
+
+    def write_chapter_subsections(
+        self,
+        chapter: dict[str, Any],
+        subsections: list[dict[str, Any]],
+        cards: list[dict[str, Any]],
+        global_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = {"chapter": chapter, "subsections": subsections, "cards": cards, "global_summary": global_summary}
+
+        def run() -> dict[str, Any]:
+            if self.provider == "local_heuristic":
+                return self._local_write_chapter_subsections(chapter, subsections, cards, global_summary)
+            prompt = _read_prompt(
+                "chapter_subsection_writer_prompt.txt",
+                (
+                    "You are a blog note subsection writing agent. Return one SUBSECTION tag block for every input "
+                    "subsection. Do not return JSON. Keep subsection ids, shot ids, and file paths unchanged."
+                ),
+            )
+            raw = self._chat_text("chapter_write", prompt, payload)
+            result = _parse_chapter_subsection_write_tags(raw, subsections, cards, global_summary)
+            return _require_keys("chapter_write", result, ["subsections"])
 
         return self._with_retries("chapter_write", run, payload)

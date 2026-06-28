@@ -12,14 +12,34 @@
 - 保留 referenced_shots，便于追溯。
 - representative_frame 应尽量从引用镜头中选择文字最清晰、信息密度最高的一帧。
 - 所有自然语言字段必须使用简体中文；英文术语、代码、产品名、缩写保持原文。
-- 只返回严格 JSON，不要 Markdown 代码块，不要额外解释。
+- 使用标签结构输出，不要输出 JSON，不要 Markdown 代码块，不要额外解释。
+- 标签名、shot_id 和文件路径必须保持原样，不要翻译。
 
-必需 JSON 字段：
-{
-  "chapter_id": "string",
-  "title": "string",
-  "representative_frame": "string|null",
-  "body_markdown": "string",
-  "key_points": ["string"],
-  "referenced_shots": ["string"]
-}
+必需标签结构：
+
+<CHAPTER_ID>
+当前章节 chapter_id
+</CHAPTER_ID>
+
+<TITLE>
+章节标题
+</TITLE>
+
+<REPRESENTATIVE_FRAME>
+从当前章节引用镜头中选择的 recommended_display_frame 路径；没有可用帧则写 null
+</REPRESENTATIVE_FRAME>
+
+<BODY_MARKDOWN>
+这里写完整章节正文。正文可以使用 Markdown 标题、列表、表格和代码块；不要在正文中写视频解说套话。
+</BODY_MARKDOWN>
+
+<KEY_POINTS>
+- 关键点 1
+- 关键点 2
+- 关键点 3
+</KEY_POINTS>
+
+<REFERENCED_SHOTS>
+- shot_001
+- shot_002
+</REFERENCED_SHOTS>

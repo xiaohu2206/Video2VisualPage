@@ -4,16 +4,17 @@
 - 合并重复或相近主题，不要逐条复述 chunk topics。
 - 按视频时间顺序组织 SECTION。
 - THEME 是全片主主题，不超过 24 个中文字符。
-- SECTION 是全局大纲标题，不超过 28 个中文字符。
-- SECTION 数量控制在 1 到 6 个。
+- SECTION 是全局大纲标题,尽可能用原文相似文字。
 - 如果一个 SECTION 主要来自多个 chunk，请在 chunks 属性里写多个 chunk_id，用英文逗号分隔。
 - 不要输出 JSON。
 - 不要输出 Markdown 标题。
 - 不要解释你的思考过程。
 - 只输出下面这些标签。
 
-输出格式：
+输出格式示例：
 <THEME>全片主主题</THEME>
 <STYLE>structured_report</STYLE>
 <SECTION chunks="chunk_001">第一部分标题</SECTION>
-<SECTION chunks="chunk_002,chunk_003">第二部分标题</SECTION>
+<SECTION chunks="chunk_002,chunk_003">第xxx部分标题</SECTION>
+<SECTION chunks="xxxx">第xxx部分标题</SECTION>
+....

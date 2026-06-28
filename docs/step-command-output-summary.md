@@ -361,3 +361,23 @@ python -m video2visualpage resume $PROJECT
 ```powershell
 python -m video2visualpage run $VIDEO --project-name demo --to-stage qa
 ```
+
+## 测试命令
+
+跑完整自动化测试：
+
+```powershell
+python -m pytest -q
+```
+
+只跑模型适配器、模型监控和摘要相关测试：
+
+```powershell
+python -m pytest tests/test_shot_understanding.py tests/test_llm_monitoring.py tests/test_summary_reduce_global_outline.py -q
+```
+
+真实调用 `.env` 中配置的文本模型和视觉模型：
+
+```powershell
+python tests/manual_model_smoke.py
+```

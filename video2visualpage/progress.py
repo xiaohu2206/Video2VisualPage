@@ -64,7 +64,12 @@ class ProgressReporter:
         model_text = model or "local_heuristic"
         label = self._current_label or logical_stage
         extra = detail if detail not in (None, "") else self._current_detail
-        action = "运行本地分析" if provider == "local_heuristic" else "请求模型"
+        if provider == "local_heuristic":
+            action = "运行本地分析"
+        elif provider == "paddleocr":
+            action = "运行本地 OCR"
+        else:
+            action = "请求模型"
         self.emit(
             self._item_percent(completed=False),
             f"{action} attempt {attempt}: {label}",

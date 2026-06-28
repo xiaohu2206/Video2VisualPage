@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Iterable
+
+_JSONL_APPEND_LOCK = threading.Lock()
 
 
 def _replace_with_temp(path: Path, data: bytes) -> None:
@@ -43,9 +46,10 @@ def append_jsonl(path: str | Path, item: Any) -> Path:
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(item, ensure_ascii=False, sort_keys=False)
-    with out.open("a", encoding="utf-8") as handle:
-        handle.write(line)
-        handle.write("\n")
+    with _JSONL_APPEND_LOCK:
+        with out.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.write("\n")
     return out
 
 

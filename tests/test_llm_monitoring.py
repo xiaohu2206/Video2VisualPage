@@ -52,6 +52,8 @@ def test_llm_monitor_writes_structured_function_log(tmp_path) -> None:
 
 
 def test_llm_monitor_records_provider_call_without_api_key(tmp_path, monkeypatch) -> None:
+    captured_request_bodies = []
+
     class FakeResponse:
         def __enter__(self):
             return self
@@ -83,6 +85,7 @@ def test_llm_monitor_records_provider_call_without_api_key(tmp_path, monkeypatch
             return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def fake_urlopen(request, timeout):
+        captured_request_bodies.append(json.loads(request.data.decode("utf-8")))
         return FakeResponse()
 
     monkeypatch.setattr(adapter_module.urllib.request, "urlopen", fake_urlopen)
@@ -111,7 +114,13 @@ def test_llm_monitor_records_provider_call_without_api_key(tmp_path, monkeypatch
     function_row = next(row for row in rows if row["record_type"] == "function_call")
     raw_detail = read_json(_detail_path(tmp_path, raw_row))
     raw_detail_text = json.dumps(raw_detail, ensure_ascii=False)
+    user_content = captured_request_bodies[0]["messages"][1]["content"]
 
+    assert isinstance(user_content, str)
+    assert "Input context:" in user_content
+    assert "Chunk id: chunk_001" in user_content
+    assert '"chunk_id"' not in user_content
+    assert '"cards"' not in user_content
     assert raw_detail["parent_call_id"] == function_row["call_id"]
     assert raw_detail["request"]["payload_summary"]["identifiers"]["chunk_id"] == "chunk_001"
     assert raw_detail["response"]["usage"]["total_tokens"] == 20

@@ -51,6 +51,19 @@ MODEL_ROLE_BY_STAGE = {
 }
 
 
+def _chapter_write_signature_config(config: dict[str, Any]) -> dict[str, int]:
+    raw = config.get("chapter_write")
+    if not isinstance(raw, dict):
+        llm = config.get("llm", {})
+        raw = llm.get("chapter_write") if isinstance(llm, dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    try:
+        max_shots = int(raw.get("max_shots_per_call", 20))
+    except (TypeError, ValueError):
+        max_shots = 20
+    return {"max_shots_per_call": max(1, max_shots)}
+
+
 def normalize_stage_id(value: str) -> str:
     value = value.strip()
     if value in STAGE_IDS:
@@ -166,7 +179,12 @@ def _model_signature_current(project_dir: str | Path, stage_id: str, manifest: d
     except Exception:  # noqa: BLE001 - let the real stage fail with the detailed config error.
         return False
     current = model_signature(config, MODEL_ROLE_BY_STAGE.get(stage_id))
-    return previous.get("signature") == current.get("signature")
+    if previous.get("signature") != current.get("signature"):
+        return False
+    if stage_id == "09_chapter_write":
+        previous_write_config = (manifest.get("result") or {}).get("chapter_write_config")
+        return previous_write_config == _chapter_write_signature_config(config)
+    return True
 
 
 def _dependencies_current(project_dir: str | Path, stage_id: str, manifest_mtime: float) -> bool:

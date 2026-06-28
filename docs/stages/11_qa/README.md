@@ -73,6 +73,8 @@ outputs/{project_id}/qa/qa_report.json
 | `shot_refs` | 字幕、镜头包、镜头分析引用的 `shot_id` 存在 |
 | `outline_refs` | `outline.json` 章节引用的镜头存在 |
 | `chapter_refs` | 章节引用镜头属于对应 outline 章节 |
+| `chapter_subsection_body` | 有 `subsections` 的章节正文包含所有小节标题，且顺序与 outline 一致 |
+| `chapter_subsection_refs` | 小节级正文生成的引用不越过所在章节；如保存小节级中间结果，则还需校验不越过所在小节 |
 | `image_paths` | 关键帧和章节代表图存在 |
 | `render_outputs` | `index.html` 存在，PDF 按配置检查 |
 | `empty_content` | 章节正文和摘要不应为空 |
@@ -99,6 +101,8 @@ outputs/{project_id}/qa/qa_report.json
 - 建立全局 `shot_id` 索引。
 - 检查每个阶段的关键产物。
 - 检查引用链：shot -> package -> analysis -> outline -> chapter -> render。
+- 对有 `subsections` 的章节，检查最终 `body_markdown` 是否保留所有小节标题和顺序。
+- 检查章节 warning 中的 `oversized_subsection` 等写作分批降级信息，并作为非阻断 warning 汇总。
 - 输出结构化 `qa_report.json`。
 - 根据错误严重程度决定 CLI exit code。
 - 更新 `run_state.json`。
@@ -148,6 +152,8 @@ python -m video2visualpage qa --project outputs\demo_20260623_200000 --fix
 - 构造完整通过的 fixture。
 - 构造损坏 JSON fixture。
 - 构造 outline 引用不存在 shot 的 fixture。
+- 构造有 `subsections` 但章节正文缺失小节标题的 fixture。
+- 构造 `oversized_subsection` warning fixture，确认 QA 只报告 warning 不自动重写正文。
 - 构造章节图片缺失 fixture。
 - 单测 `--fix` 只做低风险修复。
 

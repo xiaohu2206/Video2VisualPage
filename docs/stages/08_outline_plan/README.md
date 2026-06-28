@@ -70,6 +70,8 @@ outputs/{project_id}/outline_plan/subsection_decisions.jsonl
 - `subsections` 是可选字段；只有大章节确实需要细分时才生成。
 - 小节必须只引用当前章节内的 `shot_id`。
 - 小节代表镜头必须属于当前小节。
+- 下游 `09_chapter_write` 会把小节作为最小写作输入单位，因此这里不需要为了写作调用阈值继续拆碎小节。
+- 如果大章节没有生成 `subsections`，`09_chapter_write` 只能按整章写作；因此明显过大的章节应优先在本阶段生成小节或写入结构风险。
 
 ## 输入给模型的材料
 
@@ -117,6 +119,8 @@ outputs/{project_id}/outline_plan/subsection_decisions.jsonl
 
 二级小节不是用来修复明显错误的一级章节。如果一个小节已经可以独立成为页面目录中的一章，应该回到一级目录规划阶段重新切分章节。
 
+小节数量和大小主要服务语义结构，不直接承担模型调用批次控制。写作阶段会按 `chapter_write.max_shots_per_call` 将相邻小节打包调用；如果单个小节超过该阈值，也不会在写作阶段继续拆分，而是单独调用并记录 warning。
+
 模型不输出 JSON，只输出标签：
 
 ```txt
@@ -156,6 +160,7 @@ python -m video2visualpage plan-outline `
 | 章节没有镜头 | 删除该章节或合并到相邻章节 |
 | 没有代表镜头 | 选择本章最高 `importance_score` 镜头 |
 | 章节覆盖过大且 topic shift 很多 | 写入结构风险；必要时触发结构 QA |
+| 大章节未生成小节 | 保持兼容但写结构风险，提示下游可能整章写作 |
 | 所有章节都无效 | 阶段失败 |
 
 ## 验收标准
@@ -167,6 +172,7 @@ python -m video2visualpage plan-outline `
 - `representative_shot_id` 属于当前章节。
 - 一级章节边界优先匹配 `section_sources` 指向的 chunk 范围。
 - 二级小节标题不应与其他一级章节标题高度重复。
+- 对明显过大的章节，应生成 `subsections` 或在 `outline_structure_qa.json` / warnings 中说明风险。
 - `run_state.json` 中 `08_outline_plan` 为 `done`。
 
 ## 测试建议

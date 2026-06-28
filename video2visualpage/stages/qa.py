@@ -77,6 +77,126 @@ def _check_chapter_images(project_path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _chapter_index(project_path: Path) -> tuple[list[dict[str, Any]], str | None]:
+    index_path = find_stage_artifact(project_path, "09_chapter_write", "chapters_index.json")
+    if not index_path.exists():
+        return [], "missing chapters_index.json"
+    index = read_json(index_path)
+    return list(index.get("chapters", []) or []), None
+
+
+def _outline_by_chapter_id(project_path: Path) -> tuple[dict[str, dict[str, Any]], str | None]:
+    outline_path = find_stage_artifact(project_path, "08_outline_plan", "outline.json")
+    if not outline_path.exists():
+        return {}, "missing outline.json"
+    outline = read_json(outline_path)
+    return {str(chapter.get("chapter_id")): chapter for chapter in list(outline.get("chapters") or [])}, None
+
+
+def _check_chapter_refs(project_path: Path) -> list[dict[str, Any]]:
+    items, index_error = _chapter_index(project_path)
+    outline_by_id, outline_error = _outline_by_chapter_id(project_path)
+    if index_error or outline_error:
+        return [{"name": "chapter_refs", "status": "skipped", "reason": index_error or outline_error}]
+
+    invalid: list[dict[str, Any]] = []
+    missing_chapters: list[str] = []
+    for item in items:
+        chapter_id = str(item.get("chapter_id"))
+        outline_chapter = outline_by_id.get(chapter_id)
+        if not outline_chapter:
+            missing_chapters.append(chapter_id)
+            continue
+        chapter_path = project_path / str(item.get("path"))
+        if not chapter_path.exists():
+            invalid.append({"chapter_id": chapter_id, "reason": "missing_chapter_file"})
+            continue
+        chapter = read_json(chapter_path)
+        allowed = {str(shot_id) for shot_id in list(outline_chapter.get("shot_ids") or [])}
+        for shot_id in list(chapter.get("referenced_shots") or []):
+            if str(shot_id) not in allowed:
+                invalid.append({"chapter_id": chapter_id, "shot_id": str(shot_id)})
+
+    status = "passed" if not invalid and not missing_chapters else "failed"
+    return [{"name": "chapter_refs", "status": status, "invalid": invalid, "missing_chapters": missing_chapters}]
+
+
+def _heading_position(body: str, title: str) -> int | None:
+    pattern = rf"(?m)^\s*#{{2,6}}\s+{re.escape(title)}\s*$"
+    match = re.search(pattern, body)
+    return match.start() if match else None
+
+
+def _check_chapter_subsection_body(project_path: Path) -> list[dict[str, Any]]:
+    items, index_error = _chapter_index(project_path)
+    outline_by_id, outline_error = _outline_by_chapter_id(project_path)
+    if index_error or outline_error:
+        return [{"name": "chapter_subsection_body", "status": "skipped", "reason": index_error or outline_error}]
+
+    missing: list[dict[str, Any]] = []
+    out_of_order: list[str] = []
+    checked = 0
+    for item in items:
+        chapter_id = str(item.get("chapter_id"))
+        outline_chapter = outline_by_id.get(chapter_id)
+        subsections = list((outline_chapter or {}).get("subsections") or [])
+        if not subsections:
+            continue
+        checked += 1
+        chapter_path = project_path / str(item.get("path"))
+        if not chapter_path.exists():
+            missing.append({"chapter_id": chapter_id, "title": "<chapter_file>"})
+            continue
+        chapter = read_json(chapter_path)
+        body = str(chapter.get("body_markdown") or "")
+        positions: list[int] = []
+        for subsection in subsections:
+            title = str(subsection.get("title") or subsection.get("subsection_id") or "")
+            position = _heading_position(body, title)
+            if position is None:
+                missing.append({"chapter_id": chapter_id, "title": title})
+            else:
+                positions.append(position)
+        if positions != sorted(positions):
+            out_of_order.append(chapter_id)
+
+    status = "passed" if not missing and not out_of_order else "failed"
+    return [
+        {
+            "name": "chapter_subsection_body",
+            "status": status,
+            "checked_chapters": checked,
+            "missing": missing,
+            "out_of_order": out_of_order,
+        }
+    ]
+
+
+def _check_chapter_write_warnings(project_path: Path) -> list[dict[str, Any]]:
+    items, index_error = _chapter_index(project_path)
+    if index_error:
+        return [{"name": "chapter_write_warnings", "status": "skipped", "reason": index_error}]
+
+    oversized: list[dict[str, Any]] = []
+    for item in items:
+        chapter_path = project_path / str(item.get("path"))
+        if not chapter_path.exists():
+            continue
+        chapter = read_json(chapter_path)
+        for warning in list(chapter.get("warnings") or []):
+            warning_text = str(warning)
+            if "oversized_subsection" in warning_text:
+                oversized.append({"chapter_id": chapter.get("chapter_id"), "warning": warning_text})
+
+    return [
+        {
+            "name": "chapter_write_warnings",
+            "status": "warning" if oversized else "passed",
+            "oversized_subsections": oversized,
+        }
+    ]
+
+
 def _check_final_outputs(project_path: Path) -> list[dict[str, Any]]:
     config = read_json(find_stage_artifact(project_path, "00_init", "config.json"))
     html_path = find_stage_artifact(project_path, "10_static_render", "index.html")
@@ -253,6 +373,9 @@ def run_qa(project_dir: str | Path, *, autofix: bool | None = None) -> dict[str,
     checks.extend(_check_contracts(project_path))
     checks.extend(_check_outline_refs(project_path))
     checks.extend(_check_chapter_images(project_path))
+    checks.extend(_check_chapter_refs(project_path))
+    checks.extend(_check_chapter_subsection_body(project_path))
+    checks.extend(_check_chapter_write_warnings(project_path))
     checks.extend(_check_final_outputs(project_path))
     errors = _collect_errors(checks)
     warnings = [check for check in checks if check.get("status") == "skipped"]
